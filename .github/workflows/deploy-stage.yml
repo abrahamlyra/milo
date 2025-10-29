@@ -50,7 +50,7 @@ jobs:
           gcloud config set project ${{ vars.PROJECT_ID }}
           gcloud config set run/region ${{ vars.REGION }}
 
-      # 💥 Bloque VPC-SC Safe (ASÍNC.): Resuelve el error de streaming de logs
+      # Bloque VPC-SC Safe (ASÍNC.)
       - name: Build & Push Docker Image (VPC-SC Safe)
         id: build_id
         run: |
@@ -62,10 +62,10 @@ jobs:
           BUILD_NAME=$(gcloud builds submit . \
             --tag "$IMAGE_URL" \
             --async \
+            --no-stream \
             --format='value(name)')
 
           echo "⏳ Cloud Build Name: $BUILD_NAME"
-          # Guardamos el URL y el nombre para el siguiente paso
           echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_OUTPUT"
           echo "BUILD_NAME=$BUILD_NAME" >> "$GITHUB_OUTPUT"
           
@@ -85,6 +85,7 @@ jobs:
           
           echo "❌ Timeout esperando que Cloud Build termine después de 10 minutos."; exit 1
           
+      # 💥 FIX CRÍTICO: El argumento --set-env-vars se separa en múltiples líneas 💥
       - name: Deploy to Cloud Run
         run: |
           IMAGE_URL=${{ steps.build_id.outputs.IMAGE_URL }}
@@ -98,7 +99,14 @@ jobs:
             --add-cloudsql-instances "$INSTANCE_CONN" \
             --vpc-connector "projects/${{ vars.PROJECT_ID }}/locations/${{ vars.REGION }}/connectors/lyra-suite-stage-conn" \
             --vpc-egress "private-ranges-only" \
-            --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }},DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/$INSTANCE_CONN&sslmode=disable"
+            
+            # Aquí se separa el argumento, resolviendo el error de sintaxis de la shell
+            --set-env-vars LYRA_API_URL=${{ vars.LYRA_API_URL }} \
+            --set-env-vars HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }} \
+            --set-env-vars HTTP_RETRIES=${{ vars.HTTP_RETRIES }} \
+            --set-env-vars ALLOWED_ORIGINS="${{ vars.ALLOWED_ORIGINS }}" \
+            --set-env-vars OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }} \
+            --set-env-vars DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/$INSTANCE_CONN&sslmode=disable
             
       - name: Get Service URL
         run: gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
