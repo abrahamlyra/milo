@@ -1,0 +1,17 @@
+{
+  "name": "milo-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node --env-file=.env src/webhook/server.js",
+    "start": "node src/webhook/server.js",
+    "build": "echo \"(no build yet)\""
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "zod": "^3.23.8"
+  }
+}
