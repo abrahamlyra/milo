@@ -1,130 +1,220 @@
 // src/lyra/fill/index.js
 import { registerTool } from '../../core/nlu/intentRouter.js';
-import { buildSuggestedPayload } from '../../core/utils/suggest.js';
-import { normalizeByFieldKey } from '../../core/utils/normalize.js';
-import { resolveCatalog } from '../catalogs/resolve.js';
+import { normalizeRFC, normalizeRazonSocial } from '../../core/utils/normalize.js';
+import { resolveEnum } from '../catalogs/resolve.js';
 
-// Helpers locales para no crecer session.js
-function setValueDeep(state, key, value) {
-  const parts = String(key).split('.');
-  let ref = state;
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i];
-    const isArr = p.endsWith('[]');
-    const name = isArr ? p.slice(0, -2) : p;
-    if (i === parts.length - 1) {
-      ref[name] = value;
-    } else {
-      if (isArr) {
-        ref[name] = ref[name] || [{}];
-        ref = ref[name][0];
-      } else {
-        ref[name] = ref[name] || {};
-        ref = ref[name];
-      }
-    }
-  }
-}
-
-function listProvidedKeys(obj, prefix = '') {
-  const out = [];
-  for (const k of Object.keys(obj || {})) {
-    const v = obj[k];
-    const path = prefix ? `${prefix}.${k}` : k;
-    if (Array.isArray(v)) {
-      out.push(`${path}[]`);
-      if (v[0] && typeof v[0] === 'object') {
-        out.push(...listProvidedKeys(v[0], `${path}[]`));
-      }
-    } else if (v && typeof v === 'object') {
-      out.push(...listProvidedKeys(v, path));
-    } else {
-      out.push(path);
-    }
-  }
-  return out;
+function getCtxState(ctx) {
+  const s = ctx.session || {};
+  const tid = s.selectedTemplateId;
+  if (!tid) throw new Error('No hay plantilla seleccionada. Usa: usar <templateId>');
+  const contract = s.contracts?.[tid];
+  if (!contract) throw new Error('Contract no cargado para esta plantilla.');
+  const provided = (s.provided ?? {})[tid] ?? {};
+  return { tid, s, contract, provided };
 }
 
 function computeMissing(contract, provided) {
-  const required = new Set((contract?.fields || []).filter(f => f.required).map(f => f.key));
-  const got = new Set(listProvidedKeys(provided));
-  return [...required].filter(k => !got.has(k));
+  const missing = [];
+  const fields = Array.isArray(contract?.fields) ? contract.fields : [];
+
+  for (const f of fields) {
+    if (!f.required) continue;
+
+    // items[].campo → requiere al menos un item con ese campo
+    if (f.key?.startsWith?.('items[].')) {
+      const k = f.key.replace('items[].', '');
+      const items = Array.isArray(provided.items) ? provided.items : [];
+      const hasAtLeastOne =
+        items.length > 0 && items.some((row) => row && row[k] !== undefined && row[k] !== '');
+      if (!hasAtLeastOne) missing.push(f.key);
+      continue;
+    }
+
+    // campo plano (si hay default en provided ya no se marca)
+    const v = provided[f.key];
+    if (v === undefined || v === null || v === '') {
+      missing.push(f.key);
+    }
+  }
+
+  return missing;
 }
 
-function findField(contract, key) {
-  return (contract?.fields || []).find(f => f.key === key);
+function applyNormalizers(key, value) {
+  if (key === 'receptor_rfc') return normalizeRFC(value);
+  if (key === 'receptor_razon') return normalizeRazonSocial(value);
+  return value;
 }
 
 export function registerFillTools(contextFactory) {
-  /* fill.missing */
-  registerTool('fill.missing', async () => async (_input = {}) => {
-    const { session } = contextFactory();
-    const contract = session.contract || {};
-    session.provided = session.provided || {};
-    const missing = computeMissing(contract, session.provided);
-    return { missing };
-  });
-
-  /* fill.suggest (mode=min|full) */
-  registerTool('fill.suggest', async () => async (input = {}) => {
-    const { session } = contextFactory();
-    const mode = (input.mode || 'min').toLowerCase();
-    const payload = buildSuggestedPayload(session.contract || {}, { mode });
-    session.suggestion = payload;
-    return { mode, payload };
-  });
-
-  /* fill.apply (aplica última sugerencia) */
-  registerTool('fill.apply', async () => async (_input = {}) => {
-    const { session } = contextFactory();
-    if (!session.suggestion) return { applied: false };
-    session.provided = session.provided || {};
-
-    // Merge profundo sugerencia -> provided
-    const merged = structuredClone(session.provided);
-    const deepMerge = (a, b) => {
-      if (Array.isArray(a) && Array.isArray(b)) return b.length ? b : a;
-      if (Array.isArray(b)) return b;
-      if (typeof a === 'object' && typeof b === 'object') {
-        const out = { ...a };
-        for (const k of Object.keys(b)) out[k] = deepMerge(a?.[k], b[k]);
-        return out;
-      }
-      return b ?? a;
+  /* =========================
+     faltantes
+  ========================= */
+  registerTool('fill.missing', async () => {
+    const ctx = contextFactory();
+    return async () => {
+      const { tid, s, contract, provided } = getCtxState(ctx);
+      const missing = computeMissing(contract, provided);
+      s.missing = s.missing || {};
+      s.missing[tid] = missing;
+      return { templateId: tid, missing };
     };
-    session.provided = deepMerge(session.provided, session.suggestion);
-    session.suggestion = null;
-    return { applied: true, merged: session.provided };
   });
 
-  /* fill.set (key=value ...) */
-  registerTool('fill.set', async () => async (kvInput = {}) => {
-    const { session } = contextFactory();
-    session.provided = session.provided || {};
-    const contract = session.contract || {};
-    const fieldsByKey = new Map((contract.fields || []).map(f => [f.key, f]));
+  /* =========================
+     sugerir  (UNA SOLA DEFINICIÓN)
+  ========================= */
+  registerTool('fill.suggest', async () => {
+    const ctx = contextFactory();
+    return async ({ mode = 'min' } = {}) => {
+      const { tid, s, contract, provided } = getCtxState(ctx);
+      const fields = Array.isArray(contract?.fields) ? contract.fields : [];
+      const catalogs = contract?.catalogs || {};
 
-    // Para cada key=value recibido
-    for (const [rawKey, rawValue] of Object.entries(kvInput)) {
-      const key = String(rawKey).trim();
-      const field = fieldsByKey.get(key) || findField(contract, key);
-      let value = rawValue;
+      const suggestion = {};
 
-      // Si el field es enum con optionsRef, resolvemos catálogo (texto → code)
-      if (field?.type === 'enum' && field?.optionsRef) {
-        const match = await resolveCatalog(field.optionsRef, String(rawValue));
-        if (match) value = match.code; // guardamos code oficial
+      for (const f of fields) {
+        // Sólo proponemos para requeridos si mode=min; para full, también opcionales
+        if (mode !== 'full' && !f.required) continue;
+
+        // Si ya trae valor el usuario, no lo pisamos
+        const current = provided[f.key];
+        if (current !== undefined && current !== null && current !== '') continue;
+
+        // items
+        if (f.key?.startsWith?.('items[].')) {
+          const k = f.key.replace('items[].', '');
+          suggestion.items = suggestion.items || [{}];   // al menos un renglón
+          suggestion.items[0][k] =
+            (f.type === 'number' || f.type === 'money') ? 1
+            : (k.toLowerCase().includes('description') ? 'Servicio' : 'Valor');
+          continue;
+        }
+
+        // enums
+        if (f.type === 'enum' && f.optionsRef) {
+          const val = resolveEnum(catalogs, f.optionsRef, null); // default válido si existe
+          if (val != null) {
+            suggestion[f.key] = val;
+            continue;
+          }
+        }
+
+        // defaults (del contract)
+        if (f.default !== undefined) {
+          suggestion[f.key] = f.default;
+          continue;
+        }
+
+        // heurística por tipo
+        switch (f.type) {
+          case 'email': suggestion[f.key] = 'cliente@dominio.com'; break;
+          case 'rfc':   suggestion[f.key] = 'XAXX010101000'; break;
+          case 'date':  suggestion[f.key] = new Date().toISOString().slice(0,10); break;
+          case 'number': suggestion[f.key] = 1; break;
+          case 'money': suggestion[f.key] = 100; break;
+          default:
+            suggestion[f.key] = f.key.toLowerCase().includes('razon')
+              ? 'ACME S.A. DE C.V.'
+              : 'Valor';
+        }
       }
 
-      // Normalización (SAT strict para razón social/RFC/etc., email solo trim)
-      value = normalizeByFieldKey(key, value);
+      // cachear para fill.apply
+      s.lastSuggestion = s.lastSuggestion || {};
+      s.lastSuggestion[tid] = { mode, suggestion };
 
-      // Asignar
-      setValueDeep(session.provided, key, value);
-    }
+      return { templateId: tid, mode, suggestion };
+    };
+  });
 
-    // Regresa faltantes tras el set
-    const missing = computeMissing(contract, session.provided);
-    return { ok: true, provided: session.provided, missing };
+  /* =========================
+     aplicar
+  ========================= */
+  registerTool('fill.apply', async () => {
+    const ctx = contextFactory();
+    return async () => {
+      const { tid, s, contract, provided } = getCtxState(ctx);
+      const incoming = s.lastSuggestion?.[tid]?.suggestion || {};
+
+      const target = { ...provided };
+
+      // merge plano + items
+      for (const [k, v] of Object.entries(incoming)) {
+        if (k === 'items' && Array.isArray(v)) {
+          const cur = Array.isArray(target.items) ? target.items : [];
+          target.items = cur.length ? cur : [];
+          // mezcla el primer renglón sugerido si no existía nada
+          if (target.items.length === 0 && v.length > 0) {
+            target.items.push({ ...v[0] });
+          }
+        } else {
+          target[k] = v;
+        }
+      }
+
+      // normalizar claves “críticas”
+      for (const [k, v] of Object.entries(target)) {
+        if (k === 'items') continue; // se normaliza al setear cada campo
+        target[k] = applyNormalizers(k, v);
+      }
+      if (Array.isArray(target.items)) {
+        target.items = target.items.map((row) => {
+          const out = { ...(row || {}) };
+          for (const [k, v] of Object.entries(out)) out[k] = applyNormalizers(k, v);
+          return out;
+        });
+      }
+
+      s.provided = s.provided || {};
+      s.provided[tid] = target;
+
+      const missing = computeMissing(contract, target);
+      return { templateId: tid, provided: target, missing };
+    };
+  });
+
+  /* =========================
+     set (multi-KV, soporta items[].campo)
+  ========================= */
+  registerTool('fill.set', async () => {
+    const ctx = contextFactory();
+    return async ({ __raw, ...kv }) => {
+      const { tid, s, contract, provided } = getCtxState(ctx);
+      const target = { ...provided };
+
+      // 1) Si vino __raw, parsea “set a=1 b=2 …”
+      if (__raw && typeof __raw === 'string') {
+        const m = __raw.match(/^set\s+(.+)$/i);
+        if (m) {
+          const part = m[1];
+          const regex = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+          let r;
+          while ((r = regex.exec(part)) !== null) {
+            const key = r[1];
+            const raw = r[3] ?? r[4] ?? r[2];
+            kv[key] = raw;
+          }
+        }
+      }
+
+      // 2) Aplica a provided (items y planos)
+      for (const [key, val] of Object.entries(kv)) {
+        if (key.startsWith('items[].')) {
+          const k = key.replace('items[].', '');
+          target.items = Array.isArray(target.items) ? target.items : [];
+          target.items[0] = target.items[0] || {};
+          target.items[0][k] = applyNormalizers(k, val);
+        } else {
+          target[key] = applyNormalizers(key, val);
+        }
+      }
+
+      s.provided = s.provided || {};
+      s.provided[tid] = target;
+
+      const missing = computeMissing(contract, target);
+      return { templateId: tid, provided: target, missing };
+    };
   });
 }
