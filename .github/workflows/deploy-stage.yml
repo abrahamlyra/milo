@@ -79,3 +79,4 @@ jobs:
             
       - name: Get Service URL
         run: gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
+        
