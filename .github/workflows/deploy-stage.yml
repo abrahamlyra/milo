@@ -26,7 +26,6 @@ jobs:
   # 2. deploy: Se encarga de la autenticación, Docker y Cloud Run
   deploy:
     needs: build-code 
-    # 💥 CORRECCIÓN FINAL: Esto obliga a GitHub a liberar los secrets de OIDC 💥
     environment: stage 
     permissions:
       contents: read
@@ -39,12 +38,13 @@ jobs:
           name: built-app-artifact
           path: .
           
-      # El paso de autenticación ahora debe funcionar porque se ha declarado el 'environment: stage'
+      # 💥 CORRECCIÓN: Se reduce la vida del token a 30 minutos para forzar el refresh 
       - name: Auth to GCP (OIDC)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+          access_token_lifetime: 1800s # <-- ¡Aquí el cambio!
           
       - name: Set GCP Project & Region Config
         run: |
@@ -54,7 +54,6 @@ jobs:
       - name: Build & Push Docker Image to Artifact Registry
         run: |
           IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
-          
           gcloud builds submit . \
             --tag "$IMAGE_URL"
             
@@ -62,12 +61,21 @@ jobs:
         run: |
           IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
           
+          # La conexión a Cloud SQL requiere el ID de conexión (INSTANCE_CONN).
+          # Usamos el formato DATABASE_URL de tu script deploy_milo.sh.
+          
+          # El formato del ID de conexión es: project-id:region:instance-name
+          INSTANCE_CONN="${{ vars.PROJECT_ID }}:${{ vars.REGION }}:lyra-db-instance"
+          
           gcloud run deploy ${{ vars.SERVICE_NAME }} \
             --image "$IMAGE_URL" \
             --region ${{ vars.REGION }} \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+            --add-cloudsql-instances "$INSTANCE_CONN" \
+            --vpc-connector "projects/${{ vars.PROJECT_ID }}/locations/${{ vars.REGION }}/connectors/lyra-suite-stage-conn" \
+            --vpc-egress "private-ranges-only" \
+            --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }},DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/$INSTANCE_CONN&sslmode=disable"
             
       - name: Get Service URL
         run: gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
