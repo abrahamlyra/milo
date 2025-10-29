@@ -30,6 +30,51 @@ app.use(cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
 
 /* =========================
+   Helpers: parsing de comandos en texto
+   Formatos aceptados en message:
+   - "tool.name"
+   - "tool.name key=value other=1"
+========================= */
+function parseKV(rest = '') {
+  const out = {};
+  // Soporta key=value con espacios; comillas opcionales
+  // Ej: q=hola page=2 title="Mi título"
+  const re = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+  let m;
+  while ((m = re.exec(rest)) !== null) {
+    const key = m[1];
+    const raw = m[3] ?? m[4] ?? m[2];
+    out[key] = /^[0-9]+$/.test(raw) ? Number(raw) : raw;
+  }
+  return out;
+}
+
+function resolveActionAndInputFromMessage(msg) {
+  if (typeof msg !== 'string') return { action: null, input: null };
+  const text = msg.trim();
+  if (!text) return { action: null, input: null };
+
+  // Caso 1: sólo el nombre del tool
+  try {
+    getTool(text); // si existe no lanza
+    return { action: text, input: {} };
+  } catch { /* no-op */ }
+
+  // Caso 2: "tool.name key=value ..."
+  const m = text.match(/^([a-z0-9._-]+)\s+(.+)$/i);
+  if (m) {
+    const candidate = m[1];
+    try {
+      getTool(candidate); // valida que exista
+      const kv = parseKV(m[2]);
+      return { action: candidate, input: kv };
+    } catch { /* no-op */ }
+  }
+
+  return { action: null, input: null };
+}
+
+/* =========================
    Context factory por request
    (inyecta http con token dinámico del payload)
 ========================= */
@@ -40,10 +85,10 @@ function makeContext(req) {
   const sessionId = body?.sessionId || body?.context?.sessionId || 'default';
 
   const http = makeClient({
-    baseURL: config.lyraApiUrl,
+    baseURL: config.lyraApiUrl,        // OJO: ya incluye /api
     timeoutMs: config.httpTimeoutMs,
     retries: config.httpRetries,
-    getToken: () => tokenCache ?? token, // token para Authorization cuando aplique
+    getToken: () => tokenCache ?? token, // Bearer dinámico
   });
 
   return {
@@ -56,15 +101,11 @@ function makeContext(req) {
 
 /* =========================
    Registro de tools
-   - Usamos un "bridge" para suministrar req actual al contextFactory
 ========================= */
-let currentReq = null; // 👈 truco para pasar req al factory cuando se ejecute el tool
+let currentReq = null; // truco para pasar req al factory
 
 const contextFactory = () => {
-  if (!currentReq) {
-    // fallback defensivo, debería estar seteado en cada request real
-    return makeContext({ body: {} });
-  }
+  if (!currentReq) return makeContext({ body: {} });
   return makeContext(currentReq);
 };
 
@@ -82,7 +123,7 @@ app.get('/health', (_req, res) => {
    Mensajería del bot (Milochat pega aquí)
 ========================= */
 app.post('/milo/message', async (req, res) => {
-  currentReq = req; // 👈 habilita contextFactory() con este request
+  currentReq = req; // habilita contextFactory() con este request
   try {
     const { message, action, input, context } = req.body || {};
     const token = extractTokenFromPayload(req.body);
@@ -96,26 +137,34 @@ app.post('/milo/message', async (req, res) => {
     const sid = context?.sessionId || 'default';
     setUserInfo(sid, userInfo);
 
-    // Por ahora: invocación explícita por 'action'
-    if (!action) {
+    // Fallback: si no viene "action", intentamos resolverlo desde "message"
+    let resolvedAction = action ?? null;
+    let resolvedInput = input ?? {};
+    if (!resolvedAction) {
+      const fromMsg = resolveActionAndInputFromMessage(message);
+      resolvedAction = fromMsg.action;
+      resolvedInput = Object.keys(fromMsg.input || {}).length ? fromMsg.input : resolvedInput;
+    }
+
+    if (!resolvedAction) {
       return res.json(
         okReply(
-          'Estoy listo. Indica la acción y los parámetros. Ej: action="templates.list" o action="templates.create".',
+          'Estoy listo. Puedes escribir el comando directo, p. ej.: `templates.list` o `templates.list q=demo page=1`.',
           { actions: listTools() }
         )
       );
     }
 
     // 1) Obtenemos el factory del tool
-    const toolFactory = getTool(action);
+    const toolFactory = getTool(resolvedAction);
 
     // 2) Instanciamos el tool con el contexto del request actual
-    const tool = await toolFactory(); // 👈 IMPORTANTE: ejecutar el factory
+    const tool = await toolFactory();
 
     // 3) Ejecutamos el tool con input (si no hay, objeto vacío)
-    const result = await tool(input || {});
+    const result = await tool(resolvedInput || {});
 
-    return res.json(okReply(`✔️ ${action} OK`, { result }));
+    return res.json(okReply(`✔️ ${resolvedAction} OK`, { result }));
   } catch (err) {
     const status = err?.response?.status || err?.status || 500;
     const detail = err?.response?.data || err?.message || String(err);
