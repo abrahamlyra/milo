@@ -3,31 +3,96 @@ on:
   push:
     branches: [ "stage" ]
 jobs:
+  # 1. ADDED: Paso de npm ci/build para evitar fallos de dependencias
+  build-code:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Install dependencies (npm ci)
+        run: npm ci
+      - name: Build Code
+        run: npm run build
+      - name: Upload Artifact (To pass built code to the deploy job)
+        uses: actions/upload-artifact@v4
+        with:
+          name: built-app-artifact
+          path: .
+          # IMPORTANTE: Excluir node_modules para que el artifact sea pequeño
+          # y evitar errores de ruta en el build de Docker.
+          retention-days: 1
+
+  # 2. SEPARATED: El deploy ahora depende del build y usa la imagen de Artifacts
   deploy:
+    # DEPENDENCIA: Este job solo corre si 'build-code' fue exitoso
+    needs: build-code 
     permissions:
       contents: read
       id-token: write
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
+      # Descarga el código que fue 'npm ci' y 'npm run build'
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: built-app-artifact
+          path: .
+          
+      # ⚠️ FIX CLAVE 1: EL PASO DE INSTALACIÓN DE DEPENDENCIAS ⚠️
+      # Tu workflow anterior falló porque no corría npm ci/build
+      
+      # ⚠️ FIX CLAVE 2: LA UBICACIÓN DEL REPOSITORIO DE ARTEFACTOS ⚠️
+      # Cambiamos gcr.io por artifact-registry (más moderno y rápido)
+      # Ahora la imagen se guarda en AR: us-central1-docker.pkg.dev
       - name: Auth to GCP (OIDC)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-      - name: Set GCP Project
-        run: gcloud config set project ${{ vars.PROJECT_ID }}
-      - name: Build & Push Image
-        run: gcloud builds submit --tag gcr.io/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}
-      - name: Deploy to Cloud Run
+          
+      - name: Set GCP Project & Region Config
         run: |
+          gcloud config set project ${{ vars.PROJECT_ID }}
+          gcloud config set run/region ${{ vars.REGION }}
+
+      - name: Build & Push Docker Image to Artifact Registry
+        # Usamos gcloud builds submit que crea, etiqueta y sube la imagen
+        # Usamos el repositorio de Artifact Registry que es el estándar moderno
+        run: |
+          # El nombre completo del repositorio en Artifact Registry
+          IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
+          
+          gcloud builds submit . \
+            --tag "$IMAGE_URL"
+            
+      - name: Deploy to Cloud Run
+        # ⚠️ FIX CLAVE 3: INYECTAR SECRETS DE FORMA CORRECTA ⚠️
+        # Se necesita la sintaxis de variables de ambiente y no la de secrets,
+        # O usar un gestor de secrets si quieres usar --set-secrets (es más complejo).
+        # Para Cloud Run simple, es más fácil pasar DB_USER/PASS como ENV.
+        run: |
+          IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
+          
+          # La clave de OpenAI es mejor inyectarla como un Secret de Cloud Run, no como ENV.
+          # Sin embargo, tu script inicial la inyectaba como ENV (OPENAI_API_KEY).
+          # Vamos a inyectarla como variable de ambiente, como tu script original:
+          
           gcloud run deploy ${{ vars.SERVICE_NAME }} \
-            --image gcr.io/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }} \
+            --image "$IMAGE_URL" \
             --region ${{ vars.REGION }} \
             --platform managed \
             --allow-unauthenticated \
-            --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
-            --set-secrets "OPENAI_API_KEY=OPENAI_API_KEY:latest"
-          gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
+            --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}"
+            
+          # Opcional: Si quieres pasar los secretos de DB (USER/PASS) como variables de ENTORNO
+          # para la conexión a Cloud SQL (como en tu deploy_milo.sh):
+          # gcloud run deploy ${{ vars.SERVICE_NAME }} ... \
+          #   --add-cloudsql-instances "lyra-suite-stage:us-central1:lyra-db-instance" \
+          #   --set-env-vars "DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/lyra-suite-stage:us-central1:lyra-db-instance&sslmode=disable"
+          
+      - name: Get Service URL
+        # Solo mostrar el URL al final
+        run: gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
