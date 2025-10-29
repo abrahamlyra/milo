@@ -164,12 +164,11 @@ app.post('/milo/message', async (req, res) => {
     // 3) Ejecutamos el tool con input (si no hay, objeto vacío)
     const result = await tool(resolvedInput || {});
 
-    // 👉 Bloque de respuesta reemplazado para manejar templates.list (INICIO)
+    // 👉 Formateo especial para templates.list (lo que ya pusimos antes)
     if (resolvedAction === 'templates.list') {
       const items = Array.isArray(result?.items) ? result.items : [];
       const maxShow = 10;
       const lines = items.slice(0, maxShow).map((t, i) => {
-        // Trata de mostrar algo útil: name y/o title e ID
         const name = t.name || t.title || t.templateName || `(sin nombre)`;
         const id   = t.id || t.templateId || t._id || '(sin-id)';
         return `  ${i + 1}. ${name} — ${id}`;
@@ -178,14 +177,46 @@ app.post('/milo/message', async (req, res) => {
       const header = items.length
         ? `Encontré ${items.length} templates:\n${lines.join('\n')}${extra}`
         : `No encontré templates con esos filtros.`;
-
       return res.json(okReply(`✔️ templates.list OK\n${header}`, { result }));
+    }
+
+    // 👉 NUEVO: formateo para templates.contract
+    if (resolvedAction === 'templates.contract') {
+      const reqs = Array.isArray(result?.required) ? result.required : [];
+      const opts = Array.isArray(result?.optional) ? result.optional : [];
+      const fields = Array.isArray(result?.fields) ? result.fields : [];
+
+      const maxShow = 12;
+      const reqLines = reqs.slice(0, maxShow).map((k, i) => `  ${i + 1}. ${k}`);
+      const optLines = opts.slice(0, maxShow).map((k, i) => `  ${i + 1}. ${k}`);
+      const reqExtra = reqs.length > maxShow ? `\n… y ${reqs.length - maxShow} más.` : '';
+      const optExtra = opts.length > maxShow ? `\n… y ${opts.length - maxShow} más.` : '';
+
+      // mini ficha por campo (name/type/hint)
+      const fieldLines = fields.slice(0, maxShow).map((f, i) => {
+        const key = f.key || '(sin-key)';
+        const ty  = f.type || 'string';
+        const tag = f.required ? 'req' : 'opt';
+        const hint = f.hint ? ` — ${f.hint}` : '';
+        return `  ${i + 1}. [${tag}] ${key} <${ty}>${hint}`;
+      });
+      const fieldExtra = fields.length > maxShow ? `\n… y ${fields.length - maxShow} más.` : '';
+
+      const header = [
+        `Contract para template ${result?.templateId || '(?)'}`,
+        reqs.length ? `\nRequeridos (${reqs.length}):\n${reqLines.join('\n')}${reqExtra}` : `\nRequeridos: (ninguno)`,
+        opts.length ? `\nOpcionales (${opts.length}):\n${optLines.join('\n')}${optExtra}` : `\nOpcionales: (ninguno)`,
+        fields.length ? `\nCampos (${fields.length}):\n${fieldLines.join('\n')}${fieldExtra}` : `\nCampos: (ninguno)`,
+        `\nEscribe valores con "key=value" para empezar a llenar, p. ej.:`,
+        `  set receptor_rfc=XXX010101XXX`,
+        `  set receptor_email=correo@dominio.com`,
+      ].join('\n');
+
+      return res.json(okReply(`✔️ templates.contract OK\n${header}`, { result }));
     }
 
     // Default: responde normal
     return res.json(okReply(`✔️ ${resolvedAction} OK`, { result }));
-    // Bloque de respuesta reemplazado (FIN)
-
   } catch (err) {
     const status = err?.response?.status || err?.status || 500;
     const detail = err?.response?.data || err?.message || String(err);
