@@ -1,24 +1,36 @@
-// src/lyra/templates/index.js
-import { registerTool } from '../../core/nlu/intentRouter.js';
-import templatesCreate from './create.js';
-import templatesList from './list.js';
-import templatesContract from './contract.js'; // 👈 NUEVO (asegúrate de tener ./contract.js)
+// src/core/nlu/intentRouter.js
+// Router minimalista para registrar/obtener tools por nombre.
+
+const registry = new Map();
 
 /**
- * Registramos EN ESTE ORDEN (como pactamos):
- * - create
- * - list
- * - contract (nuevo)
- * Si luego agregamos más (getOne, getRaw, getPreview, listByAudience), se registran aquí mismo.
+ * Registra un tool con un factory (sin ejecutar).
+ * @param {string} name
+ * @param {() => Function|Promise<Function>} factory
  */
-export function registerTemplateTools(contextFactory) {
-  registerTool('templates.create',   () => templatesCreate(contextFactory()));
-  registerTool('templates.list',     () => templatesList(contextFactory()));
-  registerTool('templates.contract', () => templatesContract(contextFactory())); // 👈 NUEVO
+export function registerTool(name, factory) {
+  if (registry.has(name)) {
+    throw new Error(`Tool duplicado: ${name}`);
+  }
+  registry.set(name, factory);
+}
 
-  // Próximas (cuando toque):
-  // registerTool('templates.listByAudience', () => templatesListByAudience(contextFactory()));
-  // registerTool('templates.getRaw',         () => templatesGetRaw(contextFactory()));
-  // registerTool('templates.getPreview',     () => templatesGetPreview(contextFactory()));
-  // registerTool('templates.getOne',         () => templatesGetOne(contextFactory()));
+/**
+ * Devuelve el factory del tool (no lo ejecuta).
+ * @param {string} name
+ * @returns {() => any}
+ */
+export function getTool(name) {
+  const f = registry.get(name);
+  if (!f) {
+    throw new Error(`Tool no encontrado: ${name}`);
+  }
+  return f;
+}
+
+/**
+ * Lista los nombres de tools registrados, ordenados.
+ */
+export function listTools() {
+  return Array.from(registry.keys()).sort();
 }
