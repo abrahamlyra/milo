@@ -1,0 +1,33 @@
+name: Deploy Stage
+on:
+  push:
+    branches: [ "stage" ]
+jobs:
+  deploy:
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Auth to GCP (OIDC)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+      - name: Set GCP Project
+        run: gcloud config set project ${{ vars.PROJECT_ID }}
+      - name: Build & Push Image
+        run: gcloud builds submit --tag gcr.io/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ vars.SERVICE_NAME }} \
+            --image gcr.io/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }} \
+            --region ${{ vars.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
+            --set-secrets "OPENAI_API_KEY=OPENAI_API_KEY:latest"
+          gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
