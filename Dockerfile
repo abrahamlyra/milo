@@ -1,21 +1,21 @@
-# Imagen base ligera
+# Dockerfile (root)
 FROM node:20-alpine
 
-# Dir de trabajo
 WORKDIR /app
 
-# Solo package.json primero (mejor cache)
+# 1) Dependencias
 COPY package*.json ./
-
-# Instala deps de producción
 RUN npm ci --omit=dev
 
-# Copia el código
-COPY src ./src
-COPY .env.example ./
+# 2) Copia el código
+COPY . .
 
-# Vars de entorno de runtime (Cloud Run pasa PORT y tus envs)
+# 3) Build (si no hay paso build, no pasa nada si falla)
+RUN npm run build || true
+
+# 4) Runtime
 ENV NODE_ENV=production
+EXPOSE 8080
 
-# Arranque
-CMD ["node", "src/webhook/server.js"]
+# Usa tu script "start" del package.json
+CMD ["npm", "start"]
