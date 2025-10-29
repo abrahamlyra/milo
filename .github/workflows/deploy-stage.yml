@@ -4,24 +4,17 @@ on:
     branches: [ "stage" ]
 
 jobs:
-  # 1) Build del código (npm ci/build) y empaquetado
   build-code:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Install dependencies (npm ci)
+      - name: Install dependencies
         run: npm ci
-
-      - name: Build Code
+      - name: Build
         run: npm run build
-
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -29,7 +22,6 @@ jobs:
           path: .
           retention-days: 1
 
-  # 2) Deploy: OIDC + Cloud Build (async) + Cloud Run
   deploy:
     needs: build-code
     environment: stage
@@ -39,8 +31,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: built-app-artifact
           path: .
@@ -52,80 +43,60 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
           access_token_lifetime: 1800s
 
-      - name: Set GCP Project & Region Config
+      - name: Set GCP Project & Region
+        shell: bash
         run: |
-          gcloud config set project ${{ vars.PROJECT_ID }}
-          gcloud config set run/region ${{ vars.REGION }}
+          gcloud config set project "${{ vars.PROJECT_ID }}"
+          gcloud config set run/region "${{ vars.REGION }}"
 
-      - name: Build & Push Docker Image (VPC-SC safe)
+      - name: Build & Push Docker Image (async)
         id: build_id
+        shell: bash
         run: |
           set -euo pipefail
           IMAGE_URL="${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}"
-          echo "IMAGE_URL=$IMAGE_URL"
-
-          # Lanza Cloud Build en async (sin streaming)
           BUILD_NAME="$(gcloud builds submit . --tag "$IMAGE_URL" --async --format='value(name)')"
-          echo "⏳ Cloud Build Name: $BUILD_NAME"
-
-          {
-            echo "IMAGE_URL=$IMAGE_URL"
-            echo "BUILD_NAME=$BUILD_NAME"
-          } >> "$GITHUB_OUTPUT"
-
-          # Poll hasta que termine (máx ~10 min)
+          echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+          echo "BUILD_NAME=$BUILD_NAME" >> "$GITHUB_OUTPUT"
           for i in {1..120}; do
             STATUS="$(gcloud builds describe "$BUILD_NAME" --format='value(status)')"
-            echo "⏳ Cloud Build status: $STATUS"
-            if [ "$STATUS" = "SUCCESS" ]; then
-              echo "✅ Build OK"
-              exit 0
-            fi
-            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "TIMEOUT" ]; then
-              echo "❌ Cloud Build terminó en estado: $STATUS"
-              exit 1
-            fi
+            echo "STATUS: $STATUS"
+            if [[ "$STATUS" == "SUCCESS" ]]; then exit 0; fi
+            if [[ "$STATUS" == "FAILURE" || "$STATUS" == "CANCELLED" || "$STATUS" == "TIMEOUT" ]]; then exit 1; fi
             sleep 5
           done
-          echo "❌ Timeout esperando Cloud Build (~10 min)"; exit 1
+          echo "Timeout esperando Cloud Build"; exit 1
 
-      - name: Dump Cloud Build failure context
-        if: failure() && steps.build_id.outputs.BUILD_NAME != ''
-        run: |
-          set -euo pipefail
-          BUILD_NAME="${{ steps.build_id.outputs.BUILD_NAME }}"
-          PROJECT_ID="${{ vars.PROJECT_ID }}"
-
-          echo "🔎 Build describe (failureInfo):"
-          gcloud builds describe "$BUILD_NAME" \
-            --project "$PROJECT_ID" \
-            --format='yaml(failureInfo,images,logsBucket,source)'
-
-          echo "🧾 Últimos logs desde Cloud Logging:"
-          ID_ONLY="${BUILD_NAME##*/}"
-          gcloud logging read \
-            'resource.type="build" AND resource.labels.build_id="'$ID_ONLY'"' \
-            --project "$PROJECT_ID" \
-            --limit 200 \
-            --format='value(textPayload)'
-
-      - name: Deploy to Cloud Run
+      - name: Deploy to Cloud Run (env-file, sin VPC connector)
+        shell: bash
         run: |
           set -euo pipefail
           IMAGE_URL="${{ steps.build_id.outputs.IMAGE_URL }}"
           INSTANCE_CONN="${{ vars.PROJECT_ID }}:${{ vars.REGION }}:lyra-db-instance"
+          RUNTIME_SA="github-actions@${{ vars.PROJECT_ID }}.iam.gserviceaccount.com"
+
+          # Generar archivo de entorno sin heredoc (evita errores de YAML)
+          printf "%s\n" \
+            "LYRA_API_URL=${{ vars.LYRA_API_URL }}" \
+            "HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }}" \
+            "HTTP_RETRIES=${{ vars.HTTP_RETRIES }}" \
+            "ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
+            "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" \
+            "DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/${INSTANCE_CONN}&sslmode=disable" \
+            > /tmp/milo.env
 
           gcloud run deploy "${{ vars.SERVICE_NAME }}" \
             --image "$IMAGE_URL" \
             --region "${{ vars.REGION }}" \
             --platform managed \
             --allow-unauthenticated \
+            --service-account "$RUNTIME_SA" \
             --add-cloudsql-instances "$INSTANCE_CONN" \
-            --vpc-connector "projects/${{ vars.PROJECT_ID }}/locations/${{ vars.REGION }}/connectors/lyra-suite-stage-conn" \
-            --vpc-egress "private-ranges-only" \
-            --set-env-vars=^|^ LYRA_API_URL="${{ vars.LYRA_API_URL }}"|HTTP_TIMEOUT_MS="${{ vars.HTTP_TIMEOUT_MS }}"|HTTP_RETRIES="${{ vars.HTTP_RETRIES }}"|ALLOWED_ORIGINS="${{ vars.ALLOWED_ORIGINS }}"|OPENAI_API_KEY="${{ secrets.OPENAI_API_KEY }}"|DATABASE_URL="postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/${INSTANCE_CONN}&sslmode=disable"
+            --env-vars-file /tmp/milo.env \
+            --cpu 1 --memory 512Mi --timeout 300
 
       - name: Get Service URL
+        shell: bash
         run: |
           gcloud run services describe "${{ vars.SERVICE_NAME }}" \
             --region "${{ vars.REGION }}" \
