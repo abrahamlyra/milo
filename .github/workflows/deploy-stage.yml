@@ -50,7 +50,7 @@ jobs:
           gcloud config set project ${{ vars.PROJECT_ID }}
           gcloud config set run/region ${{ vars.REGION }}
 
-      # 💥 FIX FINAL: Cambiamos a ASYNC + POLLING para evitar bloqueo de VPC-SC en logs
+      # 💥 Bloque VPC-SC Safe (ASÍNC.): Resuelve el error de streaming de logs
       - name: Build & Push Docker Image (VPC-SC Safe)
         id: build_id
         run: |
@@ -58,15 +58,15 @@ jobs:
           
           echo "🚀 Starting Cloud Build (VPC-SC Safe)..."
           
-          # 1) Iniciar el build de forma asíncrona (sin streaming de logs)
+          # 1) Iniciar el build de forma asíncrona (usamos --no-stream)
           BUILD_NAME=$(gcloud builds submit . \
             --tag "$IMAGE_URL" \
-            --logging=CLOUD_LOGGING_ONLY \
             --async \
+            --no-stream \
             --format='value(name)')
 
           echo "⏳ Cloud Build Name: $BUILD_NAME"
-          # Guardamos el URL para usarlo en el siguiente paso de deploy
+          # Guardamos el URL y el nombre para el siguiente paso
           echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_OUTPUT"
           echo "BUILD_NAME=$BUILD_NAME" >> "$GITHUB_OUTPUT"
           
@@ -76,7 +76,10 @@ jobs:
             echo "⏳ Cloud Build status: $STATUS"
             
             if [ "$STATUS" = "SUCCESS" ]; then exit 0; fi
-            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "TIMEOUT" ]; then exit 1; fi
+            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "TIMEOUT" ]; then 
+              echo "❌ Cloud Build failed. Check logs in Google Cloud Console."; 
+              exit 1; 
+            fi
             
             sleep 5
           done
@@ -85,7 +88,6 @@ jobs:
           
       - name: Deploy to Cloud Run
         run: |
-          # Usamos el IMAGE_URL que fue guardado en el output del paso anterior
           IMAGE_URL=${{ steps.build_id.outputs.IMAGE_URL }}
           INSTANCE_CONN="${{ vars.PROJECT_ID }}:${{ vars.REGION }}:lyra-db-instance"
           
