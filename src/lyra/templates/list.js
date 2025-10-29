@@ -13,7 +13,7 @@ export default function templatesList({ http }) {
     if (page) params.page = page;
     if (q) params.q = q;
 
-    const { data } = await http.get('/api/templates', { params });
+    const { data } = await http.get('/templates', { params });
     const items = Array.isArray(data) ? data : (data?.items ?? []);
     return {
       ok: true,
