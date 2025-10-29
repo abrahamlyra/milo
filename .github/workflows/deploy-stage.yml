@@ -2,20 +2,26 @@ name: Deploy Stage
 on:
   push:
     branches: [ "stage" ]
+
 jobs:
-  # 1. build-code: Se encarga de npm ci/build
+  # 1) Build del código (npm ci/build) y empaquetado
   build-code:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Setup Node
         uses: actions/setup-node@v4
-        with: { node-version: 20 }
+        with:
+          node-version: 20
+
       - name: Install dependencies (npm ci)
         run: npm ci
+
       - name: Build Code
         run: npm run build
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -23,83 +29,89 @@ jobs:
           path: .
           retention-days: 1
 
-  # 2. deploy: Se encarga de la autenticación, Docker y Cloud Run
+  # 2) Deploy: OIDC + Cloud Build (async, sin streaming) + Cloud Run
   deploy:
-    needs: build-code 
-    environment: stage 
+    needs: build-code
+    environment: stage
     permissions:
       contents: read
       id-token: write
     runs-on: ubuntu-latest
+
     steps:
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
           name: built-app-artifact
           path: .
-          
+
       - name: Auth to GCP (OIDC)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
           access_token_lifetime: 1800s
-          
+
       - name: Set GCP Project & Region Config
         run: |
           gcloud config set project ${{ vars.PROJECT_ID }}
           gcloud config set run/region ${{ vars.REGION }}
 
-      # 💥 Bloque VPC-SC Safe (ASÍNC.): Resuelve el error de streaming de logs
-      - name: Build & Push Docker Image (VPC-SC Safe)
+      # 🚧 Build sin streaming (VPC-SC safe): lanzamos async y hacemos polling
+      - name: Build & Push Docker Image (VPC-SC safe)
         id: build_id
         run: |
-          IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
-          
-          echo "🚀 Starting Cloud Build (VPC-SC Safe)..."
-          
-          # 1) Iniciar el build de forma asíncrona (usamos --no-stream)
-          BUILD_NAME=$(gcloud builds submit . \
+          set -euo pipefail
+          IMAGE_URL="${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}"
+          echo "IMAGE_URL=$IMAGE_URL"
+
+          # 1) Inicia Cloud Build SIN streaming de logs (async)
+          BUILD_NAME="$(gcloud builds submit . \
             --tag "$IMAGE_URL" \
             --async \
-            --no-stream \
-            --format='value(name)')
-
+            --format='value(name)')"
           echo "⏳ Cloud Build Name: $BUILD_NAME"
-          # Guardamos el URL y el nombre para el siguiente paso
-          echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_OUTPUT"
-          echo "BUILD_NAME=$BUILD_NAME" >> "$GITHUB_OUTPUT"
-          
-          # 2) Esperar a que el build termine (polling)
+
+          # 2) Exporta outputs para el paso de deploy
+          {
+            echo "IMAGE_URL=$IMAGE_URL"
+            echo "BUILD_NAME=$BUILD_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          # 3) Poll hasta completar (máx ~10 min)
           for i in {1..120}; do
-            STATUS=$(gcloud builds describe "$BUILD_NAME" --format='value(status)')
+            STATUS="$(gcloud builds describe "$BUILD_NAME" --format='value(status)')"
             echo "⏳ Cloud Build status: $STATUS"
-            
-            if [ "$STATUS" = "SUCCESS" ]; then exit 0; fi
-            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "TIMEOUT" ]; then 
-              echo "❌ Cloud Build failed. Check logs in Google Cloud Console."; 
-              exit 1; 
+            if [ "$STATUS" = "SUCCESS" ]; then
+              echo "✅ Build OK"
+              exit 0
             fi
-            
+            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "TIMEOUT" ]; then
+              echo "❌ Cloud Build terminó en estado: $STATUS"
+              exit 1
+            fi
             sleep 5
           done
-          
-          echo "❌ Timeout esperando que Cloud Build termine después de 10 minutos."; exit 1
-          
+          echo "❌ Timeout esperando Cloud Build (~10 min)"; exit 1
+
       - name: Deploy to Cloud Run
         run: |
-          IMAGE_URL=${{ steps.build_id.outputs.IMAGE_URL }}
+          set -euo pipefail
+          IMAGE_URL="${{ steps.build_id.outputs.IMAGE_URL }}"
           INSTANCE_CONN="${{ vars.PROJECT_ID }}:${{ vars.REGION }}:lyra-db-instance"
-          
-          gcloud run deploy ${{ vars.SERVICE_NAME }} \
+
+          gcloud run deploy "${{ vars.SERVICE_NAME }}" \
             --image "$IMAGE_URL" \
-            --region ${{ vars.REGION }} \
+            --region "${{ vars.REGION }}" \
             --platform managed \
             --allow-unauthenticated \
             --add-cloudsql-instances "$INSTANCE_CONN" \
             --vpc-connector "projects/${{ vars.PROJECT_ID }}/locations/${{ vars.REGION }}/connectors/lyra-suite-stage-conn" \
             --vpc-egress "private-ranges-only" \
             --set-env-vars "LYRA_API_URL=${{ vars.LYRA_API_URL }},HTTP_TIMEOUT_MS=${{ vars.HTTP_TIMEOUT_MS }},HTTP_RETRIES=${{ vars.HTTP_RETRIES }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }},DATABASE_URL=postgres://${{ secrets.DB_USER }}:${{ secrets.DB_PASS }}@/${{ secrets.DB_NAME }}?host=/cloudsql/$INSTANCE_CONN&sslmode=disable"
-            
+
       - name: Get Service URL
-        run: gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
+        run: |
+          gcloud run services describe "${{ vars.SERVICE_NAME }}" \
+            --region "${{ vars.REGION }}" \
+            --format='value(status.url)'
