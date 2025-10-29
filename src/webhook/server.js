@@ -164,7 +164,28 @@ app.post('/milo/message', async (req, res) => {
     // 3) Ejecutamos el tool con input (si no hay, objeto vacío)
     const result = await tool(resolvedInput || {});
 
+    // 👉 Bloque de respuesta reemplazado para manejar templates.list (INICIO)
+    if (resolvedAction === 'templates.list') {
+      const items = Array.isArray(result?.items) ? result.items : [];
+      const maxShow = 10;
+      const lines = items.slice(0, maxShow).map((t, i) => {
+        // Trata de mostrar algo útil: name y/o title e ID
+        const name = t.name || t.title || t.templateName || `(sin nombre)`;
+        const id   = t.id || t.templateId || t._id || '(sin-id)';
+        return `  ${i + 1}. ${name} — ${id}`;
+      });
+      const extra = items.length > maxShow ? `\n… y ${items.length - maxShow} más.` : '';
+      const header = items.length
+        ? `Encontré ${items.length} templates:\n${lines.join('\n')}${extra}`
+        : `No encontré templates con esos filtros.`;
+
+      return res.json(okReply(`✔️ templates.list OK\n${header}`, { result }));
+    }
+
+    // Default: responde normal
     return res.json(okReply(`✔️ ${resolvedAction} OK`, { result }));
+    // Bloque de respuesta reemplazado (FIN)
+
   } catch (err) {
     const status = err?.response?.status || err?.status || 500;
     const detail = err?.response?.data || err?.message || String(err);
