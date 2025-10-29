@@ -38,33 +38,55 @@ jobs:
           name: built-app-artifact
           path: .
           
-      # 💥 CORRECCIÓN: Se reduce la vida del token a 30 minutos para forzar el refresh 
       - name: Auth to GCP (OIDC)
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_ID_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-          access_token_lifetime: 1800s # <-- ¡Aquí el cambio!
+          access_token_lifetime: 1800s
           
       - name: Set GCP Project & Region Config
         run: |
           gcloud config set project ${{ vars.PROJECT_ID }}
           gcloud config set run/region ${{ vars.REGION }}
 
-      - name: Build & Push Docker Image to Artifact Registry
+      # 💥 FIX FINAL: Cambiamos a ASYNC + POLLING para evitar bloqueo de VPC-SC en logs
+      - name: Build & Push Docker Image (VPC-SC Safe)
+        id: build_id
         run: |
           IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
-          gcloud builds submit . \
-            --tag "$IMAGE_URL"
+          
+          echo "🚀 Starting Cloud Build (VPC-SC Safe)..."
+          
+          # 1) Iniciar el build de forma asíncrona (sin streaming de logs)
+          BUILD_NAME=$(gcloud builds submit . \
+            --tag "$IMAGE_URL" \
+            --logging=CLOUD_LOGGING_ONLY \
+            --async \
+            --format='value(name)')
+
+          echo "⏳ Cloud Build Name: $BUILD_NAME"
+          # Guardamos el URL para usarlo en el siguiente paso de deploy
+          echo "IMAGE_URL=$IMAGE_URL" >> "$GITHUB_OUTPUT"
+          echo "BUILD_NAME=$BUILD_NAME" >> "$GITHUB_OUTPUT"
+          
+          # 2) Esperar a que el build termine (polling)
+          for i in {1..120}; do
+            STATUS=$(gcloud builds describe "$BUILD_NAME" --format='value(status)')
+            echo "⏳ Cloud Build status: $STATUS"
             
+            if [ "$STATUS" = "SUCCESS" ]; then exit 0; fi
+            if [ "$STATUS" = "FAILURE" ] || [ "$STATUS" = "CANCELLED" ] || [ "$STATUS" = "TIMEOUT" ]; then exit 1; fi
+            
+            sleep 5
+          done
+          
+          echo "❌ Timeout esperando que Cloud Build termine después de 10 minutos."; exit 1
+          
       - name: Deploy to Cloud Run
         run: |
-          IMAGE_URL=${{ vars.REGION }}-docker.pkg.dev/${{ vars.PROJECT_ID }}/${{ vars.SERVICE_NAME }}-repo/${{ vars.SERVICE_NAME }}:${{ github.sha }}
-          
-          # La conexión a Cloud SQL requiere el ID de conexión (INSTANCE_CONN).
-          # Usamos el formato DATABASE_URL de tu script deploy_milo.sh.
-          
-          # El formato del ID de conexión es: project-id:region:instance-name
+          # Usamos el IMAGE_URL que fue guardado en el output del paso anterior
+          IMAGE_URL=${{ steps.build_id.outputs.IMAGE_URL }}
           INSTANCE_CONN="${{ vars.PROJECT_ID }}:${{ vars.REGION }}:lyra-db-instance"
           
           gcloud run deploy ${{ vars.SERVICE_NAME }} \
@@ -79,4 +101,3 @@ jobs:
             
       - name: Get Service URL
         run: gcloud run services describe ${{ vars.SERVICE_NAME }} --region ${{ vars.REGION }} --format='value(status.url)'
-        
