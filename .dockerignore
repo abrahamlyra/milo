@@ -1,0 +1,29 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log*
+yarn.lock
+pnpm-lock.yaml
+
+# Builds / caches
+dist
+build
+.tmp
+.temp
+.cache
+.eslintcache
+
+# Entornos
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode
+.idea
+
+# Otros
+.DS_Store
