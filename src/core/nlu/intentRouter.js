@@ -58,6 +58,9 @@ const NATURAL_ALIASES = [
   // sugerir / sugerir full → fill.suggest mode=...
   { re: /^sugerir(?:\s+(min|full))?$/i, action: 'fill.suggest', args: (m) => ({ mode: (m[1] || 'min').toLowerCase() }) },
 
+  // NUEVO: generar / generar documento → documents.create
+  { re: /^generar(?:\s+documento)?$/i, action: 'documents.create', args: () => ({}) },
+
   // aplicar → fill.apply
   { re: /^aplicar$/i, action: 'fill.apply', args: () => ({}) },
 
@@ -70,10 +73,10 @@ const NATURAL_ALIASES = [
 ========================= */
 /**
  * resolveActionName:
- *  - Si coincide con alias natural, regresa { action, input }.
- *  - Si coincide exactamente con un tool, regresa { action, {} }.
- *  - Si viene como "tool key=value …", parsea y regresa { action, input }.
- *  - Si nada, { action:null, input:null }.
+ * - Si coincide con alias natural, regresa { action, input }.
+ * - Si coincide exactamente con un tool, regresa { action, {} }.
+ * - Si viene como "tool key=value …", parsea y regresa { action, input }.
+ * - Si nada, { action:null, input:null }.
  */
 export function resolveActionName(text) {
   if (typeof text !== 'string') return { action: null, input: null };

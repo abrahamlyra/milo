@@ -69,3 +69,16 @@ export function formatFillApply(result) {
     ? `✔️ Sugerencia aplicada.\n\nEstado actual:\n${pretty}\n\nEscribe **faltantes** para verificar si ya quedó listo.`
     : `⚠️ No había sugerencia pendiente. Usa \`sugerir\` primero.`;
 }
+
+// AÑADIDO: Formateador para la tool documents.create
+export function formatDocumentsCreate(result) {
+  const ready = !!result?.ready;
+  if (!ready) {
+    const list = (result?.missing || []).map(k => `  • ${k}`).join('\n');
+    const msg  = list ? `Faltan:\n${list}` : 'Faltan campos requeridos.';
+    return `⚠️ No puedo generar todavía. ${msg}\n\nUsa **sugerir**, **aplicar** o **set key=valor**.`;
+  }
+  const id = result?.id || '(sin-id)';
+  const url = result?.url || result?.raw?.pdfUrl || result?.raw?.url || '(sin-url)';
+  return `✔️ Documento generado.` + (url && url !== '(sin-url)' ? `\nID: ${id}\nLink: ${url}` : `\nID: ${id}`);
+}

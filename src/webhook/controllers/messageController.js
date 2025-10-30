@@ -10,6 +10,8 @@ import {
   formatFillMissing,
   formatFillSuggest,
   formatFillApply,
+  // AÑADIDO: Importar el nuevo formateador
+  formatDocumentsCreate,
 } from '../helpers/formatters.js';
 
 export function makeMessageController(contextFactory) {
@@ -78,7 +80,13 @@ export function makeMessageController(contextFactory) {
       if (resolvedAction === 'fill.apply') {
         return res.json(okReply(formatFillApply(result), { result }));
       }
+      
+      // AÑADIDO: Formateador para documents.create
+      if (resolvedAction === 'documents.create') { 
+        return res.json(okReply(formatDocumentsCreate(result), { result }));
+      }
 
+      // Default
       return res.json(okReply(`✔️ ${resolvedAction} OK`, { result }));
     } catch (err) {
       const status = err?.response?.status || err?.status || 500;

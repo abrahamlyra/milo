@@ -10,6 +10,7 @@ import { makeMessagesRouter } from './routes/messages.js';
 
 import { registerTemplateTools } from '../lyra/templates/index.js';
 import { registerFillTools } from '../lyra/fill/index.js';
+import { registerDocumentTools } from '../lyra/documents/index.js'; // ⬅️ nuevo
 
 const app = express();
 
@@ -19,13 +20,16 @@ const app = express();
 const corsOptions = {
   origin: (origin, cb) => {
     if (!origin) return cb(null, true);
-    if (config.allowedOrigins.length === 0 || config.allowedOrigins.includes(origin)) return cb(null, true);
+    if (config.allowedOrigins.length === 0 || config.allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
     cb(new Error(`Origin no permitido: ${origin}`));
   },
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
 
 /* =========================
@@ -42,6 +46,7 @@ const contextFactory = createContextFactory(getCurrentReq);
 ========================= */
 registerTemplateTools(contextFactory);
 registerFillTools(contextFactory);
+registerDocumentTools(contextFactory); // ⬅️ registra documents.create
 
 /* =========================
    Routes
@@ -59,4 +64,9 @@ app.use('/milo', makeMessagesRouter(contextFactory, setCurrentReq));
 app.listen(config.port, () => {
   console.log(`🤖 Milo bot escuchando en :${config.port}`);
   console.log(`→ LYRA_API_URL: ${config.lyraApiUrl || '(no set)'}`);
+  if (config.allowedOrigins.length) {
+    console.log(`→ Allowed origins: ${config.allowedOrigins.join(', ')}`);
+  } else {
+    console.log('→ Allowed origins: (sin restricción; acepta cualquier origin)');
+  }
 });
