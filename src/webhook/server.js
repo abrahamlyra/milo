@@ -10,7 +10,8 @@ import { makeMessagesRouter } from './routes/messages.js';
 
 import { registerTemplateTools } from '../lyra/templates/index.js';
 import { registerFillTools } from '../lyra/fill/index.js';
-import { registerDocumentTools } from '../lyra/documents/index.js'; // ⬅️ nuevo
+import { registerDocumentTools } from '../lyra/documents/index.js';
+import { registerFacturapiTools } from '../lyra/facturapi/index.js'; 
 
 const app = express();
 
@@ -46,7 +47,8 @@ const contextFactory = createContextFactory(getCurrentReq);
 ========================= */
 registerTemplateTools(contextFactory);
 registerFillTools(contextFactory);
-registerDocumentTools(contextFactory); // ⬅️ registra documents.create
+registerDocumentTools(contextFactory);
+registerFacturapiTools(contextFactory); 
 
 /* =========================
    Routes

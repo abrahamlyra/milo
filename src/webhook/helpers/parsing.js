@@ -19,7 +19,8 @@ const NATURAL_ALIASES = [
   { re: /^usar\s+([a-z0-9-]{8,})$/i,            action: 'templates.contract', args: m => ({ templateId: m[1] }) },
   { re: /^faltantes$/i,                          action: 'fill.missing',       args: () => ({}) },
   { re: /^sugerir(?:\s+(min|full))?$/i,          action: 'fill.suggest',       args: m => ({ mode: (m[1] || 'min').toLowerCase() }) },
-  { re: /^generar(?:\s+documento)?$/i,           action: 'documents.create',   args: () => ({}) }, // ⬅️ NUEVO
+  { re: /^generar(?:\s+documento)?$/i,           action: 'documents.create',   args: () => ({}) },
+  { re: /^(?:facturar|generar\s+factura)$/i,     action: 'invoices.create',    args: () => ({}) }, // ⬅️ Alias ya agregado
   { re: /^aplicar$/i,                            action: 'fill.apply',         args: () => ({}) },
   { re: /^set\s+.+$/i,                           action: 'fill.set',           args: m => ({ __raw: m[0] }) },
 ];
@@ -58,7 +59,7 @@ export function resolveActionAndInputFromMessage(msg) {
 
 /** Mensaje inicial por defecto */
 export function initialHelpMessage() {
-  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, o `set key=valor`.';
+  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, `facturar`, o `set key=valor`.'; // ⬅️ MENSAJE ACTUALIZADO
 }
 
 export { listTools };

@@ -100,3 +100,34 @@ export function formatDocumentsCreate(result) {
 
   return `❌ No se pudo generar (error desconocido).`;
 }
+
+// ➕ Nuevo: formateador para invoices.create
+export function formatInvoicesCreate(result) {
+  if (!result || result.ok === undefined) return '❓ invoices.create: resultado desconocido.';
+
+  if (result.ok) {
+    const id = result.id ? `ID: ${result.id}\n` : '';
+    const uuid = result.uuid ? `UUID: ${result.uuid}\n` : '';
+    const link = result.pdfUrl ? `🔗 PDF: ${result.pdfUrl}` : '';
+    const xml  = result.xmlUrl ? `\n🧾 XML: ${result.xmlUrl}` : '';
+    return `✅ ¡Factura timbrada y generada!\n${id}${uuid}${link}${xml}`.trim();
+  }
+
+  if (result.reason === 'wrong_type') {
+    return `⚠️ La plantilla actual no es de factura. ${result.message || ''}`.trim();
+  }
+
+  if (result.reason === 'missing') {
+    const m = Array.isArray(result.missing) ? result.missing.join(', ') : '(?)';
+    return `❌ No se pudo facturar: faltan campos requeridos → ${m}`;
+  }
+
+  if (result.reason === 'api_error') {
+    const st = result.status || 0;
+    const d  = typeof result.detail === 'string' ? result.detail
+             : (result.detail?.message || JSON.stringify(result.detail));
+    return `❌ La API de facturación rechazó la solicitud (HTTP ${st}).\n↳ ${d}`;
+  }
+
+  return `❌ No se pudo facturar (error desconocido).`;
+}

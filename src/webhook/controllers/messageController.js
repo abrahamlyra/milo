@@ -10,8 +10,9 @@ import {
   formatFillMissing,
   formatFillSuggest,
   formatFillApply,
-  // AÑADIDO: Importar el nuevo formateador
+  // AÑADIDO: Importar los nuevos formateadores
   formatDocumentsCreate,
+  formatInvoicesCreate,          // ⬅️ NUEVO: Importación del formateador de facturas
 } from '../helpers/formatters.js';
 
 export function makeMessageController(contextFactory) {
@@ -84,6 +85,11 @@ export function makeMessageController(contextFactory) {
       // AÑADIDO: Formateador para documents.create
       if (resolvedAction === 'documents.create') { 
         return res.json(okReply(formatDocumentsCreate(result), { result }));
+      }
+      
+      // ⬅️ NUEVO: Manejar invoices.create con su formateador
+      if (resolvedAction === 'invoices.create') { 
+        return res.json(okReply(formatInvoicesCreate(result), { result }));
       }
 
       // Default
