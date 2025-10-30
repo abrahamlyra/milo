@@ -7,9 +7,16 @@ function getCtxState(ctx) {
   const s = ctx.session || {};
   const tid = s.selectedTemplateId;
   if (!tid) throw new Error('No hay plantilla seleccionada. Usa: usar <templateId>');
-  const contract = s.contracts?.[tid];
+
+  // MODIFICACIÓN 2: Tolera ambos layouts (por plantilla o plano)
+  const contract = s.contracts?.[tid] ?? s.contract ?? null;
   if (!contract) throw new Error('Contract no cargado para esta plantilla.');
-  const provided = (s.provided ?? {})[tid] ?? {};
+  
+  const provided =
+    (s.provided && s.provided[tid]) ? s.provided[tid]
+    : (s.provided && !Array.isArray(s.provided) && typeof s.provided === 'object' && !s.provided[tid]) ? s.provided
+    : {};
+
   return { tid, s, contract, provided };
 }
 
@@ -48,7 +55,7 @@ function applyNormalizers(key, value) {
 
 export function registerFillTools(contextFactory) {
   /* =========================
-     faltantes
+  	faltantes
   ========================= */
   registerTool('fill.missing', async () => {
     const ctx = contextFactory();
@@ -62,7 +69,7 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-     sugerir  (UNA SOLA DEFINICIÓN)
+  	sugerir  (UNA SOLA DEFINICIÓN)
   ========================= */
   registerTool('fill.suggest', async () => {
     const ctx = contextFactory();
@@ -84,7 +91,7 @@ export function registerFillTools(contextFactory) {
         // items
         if (f.key?.startsWith?.('items[].')) {
           const k = f.key.replace('items[].', '');
-          suggestion.items = suggestion.items || [{}];   // al menos un renglón
+          suggestion.items = suggestion.items || [{}];   // al menos un renglón
           suggestion.items[0][k] =
             (f.type === 'number' || f.type === 'money') ? 1
             : (k.toLowerCase().includes('description') ? 'Servicio' : 'Valor');
@@ -109,8 +116,8 @@ export function registerFillTools(contextFactory) {
         // heurística por tipo
         switch (f.type) {
           case 'email': suggestion[f.key] = 'cliente@dominio.com'; break;
-          case 'rfc':   suggestion[f.key] = 'XAXX010101000'; break;
-          case 'date':  suggestion[f.key] = new Date().toISOString().slice(0,10); break;
+          case 'rfc':   suggestion[f.key] = 'XAXX010101000'; break;
+          case 'date':  suggestion[f.key] = new Date().toISOString().slice(0,10); break;
           case 'number': suggestion[f.key] = 1; break;
           case 'money': suggestion[f.key] = 100; break;
           default:
@@ -129,7 +136,7 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-     aplicar
+  	aplicar
   ========================= */
   registerTool('fill.apply', async () => {
     const ctx = contextFactory();
@@ -175,7 +182,7 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-     set (multi-KV, soporta items[].campo)
+  	set (multi-KV, soporta items[].campo)
   ========================= */
   registerTool('fill.set', async () => {
     const ctx = contextFactory();

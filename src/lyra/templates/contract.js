@@ -80,6 +80,10 @@ export function registerTemplateTools(contextFactory) {
       s.selectedTemplateId = templateId;
       s.contracts = s.contracts || {};
       s.contracts[templateId] = data; // mantener "raw" aquí
+      
+      // AÑADIDO: fallback plano para compatibilidad con fill viejo o helpers
+      s.contract = data; 
+      
       s.provided = s.provided || {};
       s.provided[templateId] = s.provided[templateId] || {};
 

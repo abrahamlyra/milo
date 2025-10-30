@@ -21,7 +21,8 @@ export function makeMessageController(contextFactory) {
 
       // guarda info básica para autofill
       const userInfo = { id: context?.user?.id || null, email: context?.user?.email || null };
-      const sid = context?.sessionId || 'default';
+      // MODIFICACIÓN 1 (anteriormente aplicada): Usar sessionId de cualquier lugar del body
+      const sid = req.body?.sessionId ?? req.body?.context?.sessionId ?? 'default';
       setUserInfo(sid, userInfo);
 
       // Resolver acción
@@ -53,9 +54,13 @@ export function makeMessageController(contextFactory) {
       if (resolvedAction === 'templates.list') {
         return res.json(okReply(formatTemplatesList(result), { result }));
       }
+      
+      // MODIFICACIÓN FINAL: Solo formatea la respuesta. 
+      // La lógica de s.contract (fallback) se movió a la herramienta 'templates.contract'.
       if (resolvedAction === 'templates.contract') {
         return res.json(okReply(formatTemplatesContract(result), { result }));
       }
+      
       if (resolvedAction === 'fill.missing') {
         return res.json(okReply(formatFillMissing(result), { result }));
       }
