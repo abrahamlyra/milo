@@ -45,15 +45,38 @@ export function registerDocumentTools(contextFactory) {
       // 2) Normalizar tipos conforme al contract
       const normalized = normalizeByContract(contract, provided);
 
-      // 3) POST /documents
+      // 3) POST /documents (PARCHE ROBUSTO AQUÍ)
       try {
-        const body = { templateId: tid, data: normalized };
-        // ctx.http ya setea Authorization y x-correlation-id
-        const res = await ctx.http.post('/documents', body);
-        const data = res?.data || {};
+        // Asegura que data no esté vacía
+        const hasData = normalized && typeof normalized === 'object' && Object.keys(normalized).length > 0;
+        if (!hasData) {
+          return {
+            ok: false,
+            reason: 'missing',
+            missing: ['data'],
+            message: 'No hay datos para generar el documento.',
+          };
+        }
+      
+        // 🔑 La API espera template_id (snake_case). Mandamos ambos por compat.
+        const body = {
+          template_id: tid,
+          templateId: tid,
+          data: normalized,
+        };
 
-        // normalizar url
+        // Log de inicio de la llamada a la API
+        console.log('📝 documents.create → POST /documents', { templateId: tid, withData: hasData });
+
+        const res = await ctx.http.post('/documents', body, {
+          headers: { 'Content-Type': 'application/json' }, // por si acaso
+        });
+
+        const data = res?.data || {};
         const url = data.pdfUrl || data.url || data.signedUrl || null;
+
+        // Log de fin de la llamada
+        console.log('📝 documents.create ←', { id: data.id || data.documentId, url });
 
         return {
           ok: true,
