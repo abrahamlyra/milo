@@ -1,90 +1,108 @@
 // src/lyra/facturapi/payloadBuilder.js
 
-/**
- * buildFacturaPayloadData
- * Toma fields (plano + items[]) y los acomoda al JSON que consume Facturapi.
- * Usa las pistas del contract:
- *  - defaults: objeto con valores por defecto.
- *  - mappings: { srcKey: "dest.path" } (no-items, dot-path).
- *  - itemMappings: { srcKeyEnItem: "items[].dest.path" } para mapear cada renglón.
- *
- * Si no defines mappings, pasa campos tal cual (passthrough),
- * y copia items[] directo.
- */
+// Mapeo por defecto (ES → Facturapi). El contract puede sobrescribir.
+const DEFAULT_MAP = {
+  receptor_razon: 'customer.legal_name',
+  receptor_rfc: 'customer.tax_id',
+  receptor_regimen: 'customer.tax_system',
+  receptor_email: 'customer.email',
+  receptor_cp: 'customer.address.zip',
+  uso_cfdi: 'use',
+  forma_pago: 'payment_form',
+  metodo_pago: 'payment_method',
+  moneda: 'currency',
+  tipo: 'type',
+  tipo_comprobante: 'type',
+};
+
+const DEFAULT_ITEM_MAP = {
+  quantity: 'items[].quantity',
+  description: 'items[].product.description',
+  price: 'items[].product.price',
+  product_key: 'items[].product.product_key',
+  unit_key: 'items[].product.unit_key',
+};
+
 export function buildFacturaPayloadData({ contract, fields }) {
   const out = {};
 
-  // 1) defaults
-  if (contract?.defaults && typeof contract.defaults === 'object') {
-    deepMerge(out, contract.defaults);
-  }
+  // 0) defaults del contrato primero
+  if (isObj(contract?.defaults)) deepMerge(out, contract.defaults);
 
-  // 2) passthrough plano (excepto items, que se trata abajo)
-  if (fields && typeof fields === 'object') {
+  // 1) Passthrough plano inicial (excepto items)
+  if (isObj(fields)) {
     for (const [k, v] of Object.entries(fields)) {
       if (k !== 'items') out[k] = v;
     }
   }
 
-  // 3) mappings (no items)
-  const mappings = isObj(contract?.mappings) ? contract.mappings : {};
-  for (const [src, destPath] of Object.entries(mappings)) {
+  // 2) Mappings efectivos (DEFAULT + contract.mappings)
+  const effectiveMap = { ...DEFAULT_MAP, ...(isObj(contract?.mappings) ? contract.mappings : {}) };
+
+  // Aplica mappings no-items
+  for (const [src, destPath] of Object.entries(effectiveMap)) {
     if (!isStr(destPath) || destPath.startsWith('items[]')) continue;
-    if (fields?.[src] !== undefined) setByPath(out, destPath, fields[src]);
-  }
-
-  // 4) items[]
-  const hasItems = Array.isArray(fields?.items);
-  const itemMappings = isObj(contract?.itemMappings) ? contract.itemMappings : null;
-
-  if (hasItems) {
-    if (itemMappings) {
-      const arr = [];
-      for (const row of fields.items) {
-        const destRow = {};
-        // 4.1 map explícito
-        for (const [from, toFull] of Object.entries(itemMappings)) {
-          if (!/^items\[\]\./.test(toFull)) continue;
-          const to = toFull.replace(/^items\[\]\./, '');
-          if (row?.[from] !== undefined) setByPath(destRow, to, row[from]);
-        }
-        // 4.2 copia cualquier campo del row que no haya sido mapeado
-        for (const [k, v] of Object.entries(row || {})) {
-          if (!hasDestFor(itemMappings, k) && destRow[k] === undefined) destRow[k] = v;
-        }
-        arr.push(destRow);
-      }
-      out.items = arr;
-    } else {
-      // sin mapeo, copia directa
-      out.items = fields.items.map(r => ({ ...(r || {}) }));
+    if (fields?.[src] !== undefined) {
+      setByPath(out, destPath, fields[src]);
     }
   }
 
-  // 5) mappings que apunten a "items[]...." a nivel top (poco común, pero soportado)
-  for (const [src, destPath] of Object.entries(mappings)) {
-    if (!/^items\[\]\./.test(destPath)) continue;
-    if (!hasItems) continue;
-    const prop = destPath.replace(/^items\[\]\./, '');
-    out.items = out.items.map((r, idx) => {
-      const val = fields.items?.[idx]?.[src];
-      return val === undefined ? r : setByPath({ ...r }, prop, val);
-    });
+  // 3) Items: usa DEFAULT_ITEM_MAP + contract.itemMappings
+  const hasItems = Array.isArray(fields?.items);
+  const effectiveItemMap = { ...DEFAULT_ITEM_MAP, ...(isObj(contract?.itemMappings) ? contract.itemMappings : {}) };
+
+  if (hasItems) {
+    const arr = [];
+    for (const row of fields.items) {
+      const destRow = {};
+      // 3.1 map explícito
+      for (const [from, toFull] of Object.entries(effectiveItemMap)) {
+        if (!/^items\[\]\./.test(toFull)) continue;
+        const to = toFull.replace(/^items\[\]\./, '');
+        if (row?.[from] !== undefined) setByPath(destRow, to, row[from]);
+      }
+      // 3.2 copia cualquier campo no mapeado, sin pisar lo ya mapeado
+      for (const [k, v] of Object.entries(row || {})) {
+        if (!hasDestFor(effectiveItemMap, k) && getByPath(destRow, k) === undefined) {
+          // si viene "description"/"price" simples, ya quedaron dentro de product.*
+          destRow[k] = v;
+        }
+      }
+      arr.push(destRow);
+    }
+    out.items = arr;
   }
+
+  // 4) Normalizaciones finas para SAT/Facturapi
+  // CP 5 dígitos
+  const cp = getByPath(out, 'customer.address.zip');
+  if (cp != null) setByPath(out, 'customer.address.zip', padZip(String(cp)));
+
+  // forma_pago → '03'
+  const pf = getByPath(out, 'payment_form');
+  if (pf != null) setByPath(out, 'payment_form', padPaymentForm(String(pf)));
+
+  // moneda → upper
+  const cur = getByPath(out, 'currency');
+  if (cur != null) setByPath(out, 'currency', String(cur).toUpperCase());
+
+  // type por defecto 'I'
+  if (!getByPath(out, 'type')) setByPath(out, 'type', 'I');
 
   return out;
 }
 
-/* ============ helpers ============ */
-
+/* ===== Helpers ===== */
 function isObj(x) { return x && typeof x === 'object' && !Array.isArray(x); }
 function isStr(x) { return typeof x === 'string'; }
 
 function hasDestFor(map = {}, key) {
-  return Object.values(map || {}).some(dest => {
-    if (!isStr(dest)) return false;
-    return dest === `items[].${key}` || dest.startsWith(`items[].${key}.`);
-  });
+  return Object.values(map || {}).some(dest => isStr(dest) && (dest === `items[].${key}` || dest.startsWith(`items[].${key}.`)));
+}
+
+function getByPath(obj, path) {
+  if (!isStr(path) || !path) return undefined;
+  return path.split('.').reduce((acc, k) => (acc && acc[k] !== undefined ? acc[k] : undefined), obj);
 }
 
 function setByPath(obj, path, value) {
@@ -115,4 +133,14 @@ function deepMerge(target, src) {
     }
   }
   return target;
+}
+
+function padZip(zip) {
+  const z = zip.replace(/\D/g, '');
+  return z.padStart(5, '0').slice(-5);
+}
+
+function padPaymentForm(x) {
+  const s = x.trim();
+  return /^\d$/.test(s) ? `0${s}` : s;
 }
