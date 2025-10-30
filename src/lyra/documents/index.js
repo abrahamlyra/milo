@@ -36,9 +36,17 @@ export function registerDocumentTools(contextFactory) {
         data: provided,
       };
 
+      // AÑADIDO: Log de inicio de la llamada a la API
+      console.log('📝 documents.create → POST /documents', { templateId: tid, withData: Object.keys(provided).length > 0 });
+      
       const { data } = await ctx.http.post('/documents', body);
-      // Normaliza nombre del link
+      
+      // AÑADIDO: Log de fin de la llamada
       const url = data?.pdfUrl || data?.url || data?.signedUrl || null;
+      console.log('📝 documents.create ←', { id: data?.id || data?.documentId, url });
+      
+      // Normaliza nombre del link
+      // const url = data?.pdfUrl || data?.url || data?.signedUrl || null; // Esta línea se movió arriba para el log
 
       return {
         templateId: tid,

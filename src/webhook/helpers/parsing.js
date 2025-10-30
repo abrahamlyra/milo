@@ -16,11 +16,12 @@ export function parseKV(rest = '') {
 
 /** Alias naturales (lenguaje humano → acción + input) */
 const NATURAL_ALIASES = [
-  { re: /^usar\s+([a-z0-9-]{8,})$/i, action: 'templates.contract', args: m => ({ templateId: m[1] }) },
-  { re: /^faltantes$/i,               action: 'fill.missing',      args: () => ({}) },
-  { re: /^sugerir(?:\s+(min|full))?$/i, action: 'fill.suggest',    args: m => ({ mode: (m[1] || 'min').toLowerCase() }) },
-  { re: /^aplicar$/i,                 action: 'fill.apply',         args: () => ({}) },
-  { re: /^set\s+.+$/i,                action: 'fill.set',           args: m => ({ __raw: m[0] }) },
+  { re: /^usar\s+([a-z0-9-]{8,})$/i,            action: 'templates.contract', args: m => ({ templateId: m[1] }) },
+  { re: /^faltantes$/i,                          action: 'fill.missing',       args: () => ({}) },
+  { re: /^sugerir(?:\s+(min|full))?$/i,          action: 'fill.suggest',       args: m => ({ mode: (m[1] || 'min').toLowerCase() }) },
+  { re: /^generar(?:\s+documento)?$/i,           action: 'documents.create',   args: () => ({}) }, // ⬅️ NUEVO
+  { re: /^aplicar$/i,                            action: 'fill.apply',         args: () => ({}) },
+  { re: /^set\s+.+$/i,                           action: 'fill.set',           args: m => ({ __raw: m[0] }) },
 ];
 
 /** Intenta mapear texto a { action, input } */
@@ -57,7 +58,7 @@ export function resolveActionAndInputFromMessage(msg) {
 
 /** Mensaje inicial por defecto */
 export function initialHelpMessage() {
-  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, o `set key=valor`.';
+  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, o `set key=valor`.';
 }
 
 export { listTools };
