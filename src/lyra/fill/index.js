@@ -11,7 +11,7 @@ function getCtxState(ctx) {
   // Tolera ambos layouts (por plantilla o plano)
   const contract = s.contracts?.[tid] ?? s.contract ?? null;
   if (!contract) throw new Error('Contract no cargado para esta plantilla.');
-  
+
   const provided =
     (s.provided && s.provided[tid]) ? s.provided[tid]
     : (s.provided && !Array.isArray(s.provided) && typeof s.provided === 'object' && !s.provided[tid]) ? s.provided
@@ -69,9 +69,8 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-  	sugerir  (ROBUSTO)
+  	sugerir (alineado con formatter)
   ========================= */
-  // REEMPLAZO COMPLETO DE fill.suggest CON EL PARCHE ROBUSTO
   registerTool('fill.suggest', async (injectedFactory) => {
     const cf = injectedFactory || contextFactory;
     return async ({ mode = 'min' } = {}) => {
@@ -79,7 +78,7 @@ export function registerFillTools(contextFactory) {
       const { tid, s, contract, provided } = getCtxState(ctx);
       const fields = Array.isArray(contract?.fields) ? contract.fields : [];
       const catalogs = contract?.catalogs || {};
-      const suggestion = {};
+      const payload = {}; // <- OJO: el formatter espera "payload", no "suggestion"
 
       // Helper ultra-defensivo para proponer algo según la pista disponible
       const propose = (f) => {
@@ -93,68 +92,73 @@ export function registerFillTools(contextFactory) {
         // items[].campo
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
-          suggestion.items = suggestion.items || [{}];
-          // si el tipo no viene, intenta inferir por nombre
+          payload.items = payload.items || [{}];
           const kind = (f?.type || (/price|importe|monto|cantidad|qty|quantity/i.test(k) ? 'number' : 'string')).toLowerCase();
-
-          suggestion.items[0][k] =
+          payload.items[0][k] =
             (kind === 'number' || kind === 'money') ? 1
             : /description|concepto|desc/i.test(k) ? 'Servicio'
             : 'Valor';
           return;
         }
 
-        // enums con catálogo conocido
+        // enums con catálogo conocido (preferir el code si viene)
         if ((f?.type === 'enum' || f?.optionsRef) && f?.optionsRef) {
-          const val = resolveEnum(catalogs, f.optionsRef, null);
-          if (val != null) { suggestion[key] = val; return; }
+          const enumHit = resolveEnum(catalogs, f.optionsRef, null);
+          if (enumHit != null) {
+            const val = typeof enumHit === 'object' && enumHit !== null
+              ? (enumHit.code ?? enumHit.label ?? enumHit.value ?? enumHit)
+              : enumHit;
+            payload[key] = val;
+            return;
+          }
         }
 
         // default declarado en el contrato
-        if (f?.default !== undefined) { suggestion[key] = f.default; return; }
+        if (f?.default !== undefined) { payload[key] = f.default; return; }
 
         // heurística por tipo o por nombre de campo
         const t = String(f?.type || '').toLowerCase();
-        if (t === 'email') { suggestion[key] = 'cliente@dominio.com'; return; }
-        if (t === 'rfc')   { suggestion[key] = 'XAXX010101000'; return; }
-        if (t === 'date')  { suggestion[key] = new Date().toISOString().slice(0,10); return; }
-        if (t === 'number'){ suggestion[key] = 1; return; }
-        if (t === 'money') { suggestion[key] = 100; return; }
+        if (t === 'email') { payload[key] = 'cliente@dominio.com'; return; }
+        if (t === 'rfc')   { payload[key] = 'XAXX010101000'; return; }
+        if (t === 'date')  { payload[key] = new Date().toISOString().slice(0,10); return; }
+        if (t === 'number'){ payload[key] = 1; return; }
+        if (t === 'money') { payload[key] = 100; return; }
 
         // inferencia por nombre si no hay type
         const k = key.toLowerCase();
-        if (/razon|nombre/.test(k)) { suggestion[key] = 'ACME S.A. DE C.V.'; return; }
-        if (/rfc/.test(k))          { suggestion[key] = 'XAXX010101000'; return; }
-        if (/fecha/.test(k))        { suggestion[key] = new Date().toISOString().slice(0,10); return; }
-        if (/correo|email/.test(k)) { suggestion[key] = 'cliente@dominio.com'; return; }
-        if (/precio|monto|importe/.test(k)) { suggestion[key] = 100; return; }
-        if (/workers|throughput|cantidad|volumen|horas|plazo|dias/.test(k)) { suggestion[key] = 1; return; }
+        if (/razon|nombre/.test(k)) { payload[key] = 'ACME S.A. DE C.V.'; return; }
+        if (/rfc/.test(k))          { payload[key] = 'XAXX010101000'; return; }
+        if (/fecha/.test(k))        { payload[key] = new Date().toISOString().slice(0,10); return; }
+        if (/correo|email/.test(k)) { payload[key] = 'cliente@dominio.com'; return; }
+        if (/precio|monto|importe/.test(k)) { payload[key] = 100; return; }
+        if (/workers|throughput|cantidad|volumen|horas|plazo|dias/.test(k)) { payload[key] = 1; return; }
 
         // fallback genérico
-        suggestion[key] = 'Valor';
+        payload[key] = 'Valor';
       };
 
-      for (const f of fields) {
-        // min -> solo requeridos; full -> todos
-        if (mode !== 'full' && !f?.required) continue;
-        propose(f);
-      }
+      // “min”: solo requeridos; “full”: todos los campos
+      const take = (mode === 'full')
+        ? fields
+        : fields.filter(f => f?.required);
+
+      for (const f of take) propose(f);
 
       // Si por cualquier cosa quedó vacío, fuerza un mínimo para requeridos
-      if (Object.keys(suggestion).length === 0) {
+      if (Object.keys(payload).length === 0) {
         for (const f of fields.filter(x => x?.required)) propose(f);
       }
 
       s.lastSuggestion = s.lastSuggestion || {};
-      s.lastSuggestion[tid] = { mode, suggestion };
+      s.lastSuggestion[tid] = { mode, suggestion: payload };
 
-      return { templateId: tid, mode, suggestion };
+      // <- ALINEADO con formatFillSuggest (usa "payload")
+      return { templateId: tid, mode, payload };
     };
   });
-  // FIN DEL REEMPLAZO DE fill.suggest
 
   /* =========================
-  	aplicar
+  	aplicar (alineado con formatter)
   ========================= */
   registerTool('fill.apply', async () => {
     const ctx = contextFactory();
@@ -195,7 +199,9 @@ export function registerFillTools(contextFactory) {
       s.provided[tid] = target;
 
       const missing = computeMissing(contract, target);
-      return { templateId: tid, provided: target, missing };
+
+      // <- ALINEADO con formatFillApply (usa "applied" y "merged")
+      return { templateId: tid, applied: true, merged: target, missing };
     };
   });
 
@@ -204,18 +210,20 @@ export function registerFillTools(contextFactory) {
   ========================= */
   registerTool('fill.set', async () => {
     const ctx = contextFactory();
-    return async ({ __raw, ...kv }) => {
+    return async (input = {}) => {
       const { tid, s, contract, provided } = getCtxState(ctx);
-      const target = { ...provided };
 
-      // 1) Si vino __raw, parsea “set a=1 b=2 …”
-      if (__raw && typeof __raw === 'string') {
-        const m = __raw.match(/^set\s+(.+)$/i);
-        if (m) {
-          const part = m[1];
-          const regex = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+      // 1) Parseo defensivo de input (incluye el caso __raw con key=val)
+      const kv = {};
+      for (const [k, v] of Object.entries(input || {})) {
+        if (k !== '__raw') {
+          kv[k] = v;
+          continue;
+        }
+        if (typeof v === 'string') {
+          const re = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
           let r;
-          while ((r = regex.exec(part)) !== null) {
+          while ((r = re.exec(v)) !== null) {
             const key = r[1];
             const raw = r[3] ?? r[4] ?? r[2];
             kv[key] = raw;
@@ -224,6 +232,7 @@ export function registerFillTools(contextFactory) {
       }
 
       // 2) Aplica a provided (items y planos)
+      const target = { ...provided };
       for (const [key, val] of Object.entries(kv)) {
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
