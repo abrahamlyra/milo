@@ -70,15 +70,33 @@ export function formatFillApply(result) {
     : `⚠️ No había sugerencia pendiente. Usa \`sugerir\` primero.`;
 }
 
-// AÑADIDO: Formateador para la tool documents.create
+/**
+ * documents.create formatter (nuevo, tolerante a errores)
+ * Espera un objeto { ok, id?, url?, reason?, missing?, status?, detail? }
+ */
 export function formatDocumentsCreate(result) {
-  const ready = !!result?.ready;
-  if (!ready) {
-    const list = (result?.missing || []).map(k => `  • ${k}`).join('\n');
-    const msg  = list ? `Faltan:\n${list}` : 'Faltan campos requeridos.';
-    return `⚠️ No puedo generar todavía. ${msg}\n\nUsa **sugerir**, **aplicar** o **set key=valor**.`;
+  if (!result || result.ok === undefined) {
+    return '❓ documents.create: resultado desconocido.';
   }
-  const id = result?.id || '(sin-id)';
-  const url = result?.url || result?.raw?.pdfUrl || result?.raw?.url || '(sin-url)';
-  return `✔️ Documento generado.` + (url && url !== '(sin-url)' ? `\nID: ${id}\nLink: ${url}` : `\nID: ${id}`);
+
+  if (result.ok) {
+    const id = result.id || '(sin-id)';
+    const url = result.url ? `\n🔗 Link: ${result.url}` : '';
+    return `✔️ Documento generado\nID: ${id}${url}`;
+  }
+
+  // errores conocidos
+  if (result.reason === 'missing') {
+    const m = Array.isArray(result.missing) ? result.missing.join(', ') : '(?)';
+    return `❌ No se pudo generar: faltan campos requeridos → ${m}`;
+  }
+
+  if (result.reason === 'api_error') {
+    const st = result.status || 0;
+    const d  = typeof result.detail === 'string' ? result.detail
+             : (result.detail?.message || JSON.stringify(result.detail));
+    return `❌ La API rechazó la solicitud (HTTP ${st}).\n↳ ${d}`;
+  }
+
+  return `❌ No se pudo generar (error desconocido).`;
 }
