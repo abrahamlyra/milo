@@ -36,8 +36,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
   if (isObj(fields)) {
     for (const [k, v] of Object.entries(fields)) {
       if (k === 'items') continue;
-      // si esta clave ya tiene destino en effectiveMap, NO la pases plana
-      if (effectiveMap[k]) continue;
+      if (effectiveMap[k]) continue; // si tiene destino mapeado, no lo pases plano
       out[k] = v;
     }
   }
@@ -48,6 +47,35 @@ export function buildFacturaPayloadData({ contract, fields }) {
     if (fields?.[src] !== undefined) {
       setByPath(out, destPath, fields[src]);
     }
+  }
+
+  // 3.1 Fallbacks críticos (por si no entraron por mapping)
+  // payment_form: intenta varias fuentes
+  if (getByPath(out, 'payment_form') == null) {
+    const fallbackPF =
+      fields?.payment_form ??
+      getByPath(contract?.defaults, 'payment_form') ??
+      fields?.forma_pago ??
+      getByPath(out, 'forma_pago'); // por si sobrevivió del passthrough en algún flujo
+    if (fallbackPF != null) setByPath(out, 'payment_form', fallbackPF);
+  }
+  // payment_method (por simetría; opcional)
+  if (getByPath(out, 'payment_method') == null) {
+    const fallbackPM =
+      fields?.payment_method ??
+      getByPath(contract?.defaults, 'payment_method') ??
+      fields?.metodo_pago ??
+      getByPath(out, 'metodo_pago');
+    if (fallbackPM != null) setByPath(out, 'payment_method', fallbackPM);
+  }
+  // currency (por simetría)
+  if (getByPath(out, 'currency') == null) {
+    const fallbackCUR =
+      fields?.currency ??
+      getByPath(contract?.defaults, 'currency') ??
+      fields?.moneda ??
+      getByPath(out, 'moneda');
+    if (fallbackCUR != null) setByPath(out, 'currency', fallbackCUR);
   }
 
   // 4) Items: usa DEFAULT_ITEM_MAP + contract.itemMappings
@@ -106,10 +134,8 @@ export function buildFacturaPayloadData({ contract, fields }) {
   if (!getByPath(out, 'type')) setByPath(out, 'type', 'I');
 
   // 6) Limpieza final: asegurar que no haya claves ES duplicadas en top-level
-  // (por si en el futuro agregan nuevos mappings)
   for (const esKey of Object.keys(effectiveMap)) {
     if (!String(effectiveMap[esKey]).startsWith('items[]')) {
-      // si tiene mapping a algo que no es items, no debe existir como plano
       if (esKey in out) delete out[esKey];
     }
   }
