@@ -55,19 +55,36 @@ export function buildFacturaPayloadData({ contract, fields }) {
     const arr = [];
     for (const row of fields.items) {
       const destRow = {};
-      // 3.1 map explícito
+
+      // 3.0 si el usuario ya mandó product completo/anidado, respétalo
+      if (isObj(row?.product)) {
+        destRow.product = deepClone(row.product);
+      }
+
+      // 3.1 map explícito (no pisar si ya venía del usuario en product.*)
       for (const [from, toFull] of Object.entries(effectiveItemMap)) {
         if (!/^items\[\]\./.test(toFull)) continue;
         const to = toFull.replace(/^items\[\]\./, '');
-        if (row?.[from] !== undefined) setByPath(destRow, to, row[from]);
+        if (row?.[from] !== undefined && getByPath(destRow, to) === undefined) {
+          setByPath(destRow, to, row[from]);
+        }
       }
+
       // 3.2 copia cualquier campo no mapeado, sin pisar lo ya mapeado
       for (const [k, v] of Object.entries(row || {})) {
-        if (!hasDestFor(effectiveItemMap, k) && getByPath(destRow, k) === undefined) {
-          // si viene "description"/"price" simples, ya quedaron dentro de product.*
+        // si existe un destino mapeado (incluye product.*), NO lo dupliques al nivel raíz
+        if (hasDestFor(effectiveItemMap, k)) continue;
+        if (getByPath(destRow, k) === undefined) {
           destRow[k] = v;
         }
       }
+
+      // 3.3 limpieza de seguridad: jamás mandar estos campos planos
+      delete destRow.description;
+      delete destRow.price;
+      delete destRow.product_key;
+      delete destRow.unit_key;
+
       arr.push(destRow);
     }
     out.items = arr;
@@ -97,7 +114,12 @@ function isObj(x) { return x && typeof x === 'object' && !Array.isArray(x); }
 function isStr(x) { return typeof x === 'string'; }
 
 function hasDestFor(map = {}, key) {
-  return Object.values(map || {}).some(dest => isStr(dest) && (dest === `items[].${key}` || dest.startsWith(`items[].${key}.`)));
+  // detecta tanto items[].key como items[].algo.key (anidado: p.ej. product.description)
+  return Object.values(map || {}).some(dest =>
+    isStr(dest) &&
+    dest.startsWith('items[].') &&
+    (dest === `items[].${key}` || dest.endsWith(`.${key}`))
+  );
 }
 
 function getByPath(obj, path) {
@@ -133,6 +155,10 @@ function deepMerge(target, src) {
     }
   }
   return target;
+}
+
+function deepClone(x) {
+  return isObj(x) ? JSON.parse(JSON.stringify(x)) : x;
 }
 
 function padZip(zip) {
