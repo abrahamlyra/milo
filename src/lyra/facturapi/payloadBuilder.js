@@ -29,17 +29,20 @@ export function buildFacturaPayloadData({ contract, fields }) {
   // 0) defaults del contrato primero
   if (isObj(contract?.defaults)) deepMerge(out, contract.defaults);
 
-  // 1) Passthrough plano inicial (excepto items)
+  // 1) Mappings efectivos (DEFAULT + contract.mappings)
+  const effectiveMap = { ...DEFAULT_MAP, ...(isObj(contract?.mappings) ? contract.mappings : {}) };
+
+  // 2) Passthrough plano inicial (EXCLUYE items y claves que ya están mapeadas)
   if (isObj(fields)) {
     for (const [k, v] of Object.entries(fields)) {
-      if (k !== 'items') out[k] = v;
+      if (k === 'items') continue;
+      // si esta clave ya tiene destino en effectiveMap, NO la pases plana
+      if (effectiveMap[k]) continue;
+      out[k] = v;
     }
   }
 
-  // 2) Mappings efectivos (DEFAULT + contract.mappings)
-  const effectiveMap = { ...DEFAULT_MAP, ...(isObj(contract?.mappings) ? contract.mappings : {}) };
-
-  // Aplica mappings no-items
+  // 3) Aplica mappings no-items
   for (const [src, destPath] of Object.entries(effectiveMap)) {
     if (!isStr(destPath) || destPath.startsWith('items[]')) continue;
     if (fields?.[src] !== undefined) {
@@ -47,7 +50,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
     }
   }
 
-  // 3) Items: usa DEFAULT_ITEM_MAP + contract.itemMappings
+  // 4) Items: usa DEFAULT_ITEM_MAP + contract.itemMappings
   const hasItems = Array.isArray(fields?.items);
   const effectiveItemMap = { ...DEFAULT_ITEM_MAP, ...(isObj(contract?.itemMappings) ? contract.itemMappings : {}) };
 
@@ -56,12 +59,10 @@ export function buildFacturaPayloadData({ contract, fields }) {
     for (const row of fields.items) {
       const destRow = {};
 
-      // 3.0 si el usuario ya mandó product completo/anidado, respétalo
-      if (isObj(row?.product)) {
-        destRow.product = deepClone(row.product);
-      }
+      // 4.0 si el usuario ya mandó product completo/anidado, respétalo
+      if (isObj(row?.product)) destRow.product = deepClone(row.product);
 
-      // 3.1 map explícito (no pisar si ya venía del usuario en product.*)
+      // 4.1 map explícito (no pisar si ya venía del usuario en product.*)
       for (const [from, toFull] of Object.entries(effectiveItemMap)) {
         if (!/^items\[\]\./.test(toFull)) continue;
         const to = toFull.replace(/^items\[\]\./, '');
@@ -70,16 +71,14 @@ export function buildFacturaPayloadData({ contract, fields }) {
         }
       }
 
-      // 3.2 copia cualquier campo no mapeado, sin pisar lo ya mapeado
+      // 4.2 copia cualquier campo no mapeado, sin pisar lo ya mapeado
       for (const [k, v] of Object.entries(row || {})) {
         // si existe un destino mapeado (incluye product.*), NO lo dupliques al nivel raíz
         if (hasDestFor(effectiveItemMap, k)) continue;
-        if (getByPath(destRow, k) === undefined) {
-          destRow[k] = v;
-        }
+        if (getByPath(destRow, k) === undefined) destRow[k] = v;
       }
 
-      // 3.3 limpieza de seguridad: jamás mandar estos campos planos
+      // 4.3 limpieza de seguridad: jamás mandar estos campos planos
       delete destRow.description;
       delete destRow.price;
       delete destRow.product_key;
@@ -90,7 +89,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
     out.items = arr;
   }
 
-  // 4) Normalizaciones finas para SAT/Facturapi
+  // 5) Normalizaciones finas para SAT/Facturapi
   // CP 5 dígitos
   const cp = getByPath(out, 'customer.address.zip');
   if (cp != null) setByPath(out, 'customer.address.zip', padZip(String(cp)));
@@ -105,6 +104,15 @@ export function buildFacturaPayloadData({ contract, fields }) {
 
   // type por defecto 'I'
   if (!getByPath(out, 'type')) setByPath(out, 'type', 'I');
+
+  // 6) Limpieza final: asegurar que no haya claves ES duplicadas en top-level
+  // (por si en el futuro agregan nuevos mappings)
+  for (const esKey of Object.keys(effectiveMap)) {
+    if (!String(effectiveMap[esKey]).startsWith('items[]')) {
+      // si tiene mapping a algo que no es items, no debe existir como plano
+      if (esKey in out) delete out[esKey];
+    }
+  }
 
   return out;
 }
