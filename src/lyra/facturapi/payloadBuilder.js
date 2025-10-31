@@ -123,12 +123,15 @@ export function buildFacturaPayloadData({ contract, fields }) {
   if (cp != null) setByPath(out, 'customer.address.zip', padZip(String(cp)));
 
   // forma_pago → '03'
-  const pf = getByPath(out, 'payment_form');
-  if (pf != null) setByPath(out, 'payment_form', padPaymentForm(String(pf)));
+  // (Esta normalización se mueve al punto 6.1)
 
   // moneda → upper
   const cur = getByPath(out, 'currency');
   if (cur != null) setByPath(out, 'currency', String(cur).toUpperCase());
+  
+  // 2) Mayúsculas para payment_method (consistencia)
+  const pm = getByPath(out, 'payment_method');
+  if (pm != null) setByPath(out, 'payment_method', String(pm).toUpperCase());
 
   // type por defecto 'I'
   if (!getByPath(out, 'type')) setByPath(out, 'type', 'I');
@@ -140,6 +143,28 @@ export function buildFacturaPayloadData({ contract, fields }) {
     }
   }
 
+  // 6.1) ENFORCER CRÍTICO: payment_form NUNCA debe faltar
+  (function enforcePaymentForm() {
+    const already = getByPath(out, 'payment_form');
+    if (already != null && already !== '') {
+      // Normaliza por si llegó '3' → '03'
+      setByPath(out, 'payment_form', padPaymentForm(String(already)));
+      return;
+    }
+
+    // Orígenes válidos en orden de prioridad
+    const pf = coalesce(
+      fields?.payment_form,                                   // si el usuario lo puso directo
+      getByPath(contract?.defaults, 'payment_form'),          // defaults del contrato
+      fields?.forma_pago,                                     // alias ES
+      getByPath(out, 'forma_pago')                            // si sobrevivió del passthrough
+    );
+
+    if (pf != null && pf !== '') {
+      setByPath(out, 'payment_form', padPaymentForm(String(pf)));
+    }
+  })();
+  
   return out;
 }
 
@@ -203,4 +228,9 @@ function padZip(zip) {
 function padPaymentForm(x) {
   const s = x.trim();
   return /^\d$/.test(s) ? `0${s}` : s;
+}
+
+function coalesce(...xs) {
+  for (const x of xs) if (x !== undefined && x !== null && x !== '') return x;
+  return undefined;
 }

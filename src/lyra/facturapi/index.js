@@ -45,6 +45,20 @@ export function registerFacturapiTools(contextFactory) {
         fields_filled: normalized,
       });
 
+      // 🔒 Guardado final: jamás salgas sin payment_form
+      if (!datos_factura.payment_form || String(datos_factura.payment_form).trim() === '') {
+        // Usa la sesión original para acceder a lo que el usuario proporcionó
+        const fallback =
+          s.provided?.[tid]?.payment_form ??
+          contract?.defaults?.payment_form ??
+          s.provided?.[tid]?.forma_pago;
+    
+        if (fallback) {
+          // Aplica el mismo padding ('3' → '03')
+          datos_factura.payment_form = String(fallback).padStart(2, '0');
+        }
+      }
+
       // Modo: tolera 'mode' o 'modo', y 'test' por default
       const modeInput = _input.mode ?? _input.modo ?? s.meta?.mode ?? s.meta?.modo ?? 'test';
 
@@ -56,6 +70,15 @@ export function registerFacturapiTools(contextFactory) {
         modo: modeInput,           // usa 'mode' (ajústalo a 'modo' si tu backend lo espera así)
         skipSend: _input.skipSend ?? true,
       };
+      
+      // 1) Log de verificación justo antes del POST
+      console.log('🧾 FACTURA → payload:', {
+        payment_form: datos_factura.payment_form,
+        payment_method: datos_factura.payment_method,
+        currency: datos_factura.currency,
+        type: datos_factura.type,
+        items_len: Array.isArray(datos_factura.items) ? datos_factura.items.length : 0,
+      });
 
       try {
         console.log('🧾 invoices.create → POST /facturapi/factura-completa', { templateId: tid });
