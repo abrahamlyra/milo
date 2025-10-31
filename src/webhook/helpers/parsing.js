@@ -1,14 +1,16 @@
 // src/webhook/helpers/parsing.js
 import { getTool, listTools } from '../../core/nlu/intentRouter.js';
 
-/** KV parser: key=value con comillas y espacios */
+/** KV parser: key=value con comillas, soporta dots/brackets p.ej. items[0].price=123 */
 export function parseKV(rest = '') {
   const out = {};
-  const re = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+  // acepta letras, números, guion bajo, punto y corchetes en la KEY
+  const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
   let m;
   while ((m = re.exec(rest)) !== null) {
     const key = m[1];
     const raw = m[3] ?? m[4] ?? m[2];
+    // si es entero puro, lo casteamos a número (p.ej. quantity=1, price=3500)
     out[key] = /^[0-9]+$/.test(raw) ? Number(raw) : raw;
   }
   return out;

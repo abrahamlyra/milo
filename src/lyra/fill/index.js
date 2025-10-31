@@ -221,27 +221,49 @@ export function registerFillTools(contextFactory) {
           continue;
         }
         if (typeof v === 'string') {
-          const re = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+          // Acepta letras, números, guion bajo, punto y corchetes en la KEY
+          const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
           let r;
           while ((r = re.exec(v)) !== null) {
             const key = r[1];
             const raw = r[3] ?? r[4] ?? r[2];
-            kv[key] = raw;
+            // CAMBIO: número entero o decimal → castear
+            const cast = /^[0-9]+(\.[0-9]+)?$/.test(raw) ? Number(raw) : raw;
+            kv[key] = cast;
           }
         }
       }
 
-      // 2) Aplica a provided (items y planos)
+      // 2) Aplica a provided (items y planos) — ahora con soporte a índices de items
       const target = { ...provided };
+
       for (const [key, val] of Object.entries(kv)) {
+        // Normaliza RFC/Razón, etc.
+        const normalized = applyNormalizers(key.replace(/^items\[(\d+)\]\./, '').replace(/^items\[\]\./, ''), val);
+
+        // Caso A: items[<idx>].campo=valor
+        const mIndexed = key.match(/^items\[(\d+)\]\.(.+)$/);
+        if (mIndexed) {
+          const idx = Number(mIndexed[1]);
+          const k   = mIndexed[2];
+          target.items = Array.isArray(target.items) ? target.items : [];
+          // asegura longitud
+          while (target.items.length <= idx) target.items.push({});
+          target.items[idx] = { ...(target.items[idx] || {}), [k]: normalized };
+          continue;
+        }
+
+        // Caso B: items[].campo=valor  → por compat, escribe en items[0]
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
           target.items = Array.isArray(target.items) ? target.items : [];
           target.items[0] = target.items[0] || {};
-          target.items[0][k] = applyNormalizers(k, val);
-        } else {
-          target[key] = applyNormalizers(key, val);
+          target.items[0][k] = normalized;
+          continue;
         }
+
+        // Caso C: campos planos
+        target[key] = normalized;
       }
 
       s.provided = s.provided || {};
