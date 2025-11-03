@@ -23,11 +23,9 @@ export function makeMessageController(contextFactory) {
   //  - una función sin argumentos: () => ctx
   //  - o una función que recibe req y devuelve otra función: (req) => () => ctx
   const makePerReqFactory = (req) => {
-    // si la factory acepta 1+ args, asumimos que quiere el req
     if (contextFactory && contextFactory.length >= 1) {
       return contextFactory(req);
     }
-    // si no, intentamos usarla tal cual
     return () => contextFactory();
   };
 
@@ -37,7 +35,6 @@ export function makeMessageController(contextFactory) {
       const token = extractTokenFromPayload(req.body);
       if (!token) return res.status(401).json(needsAuth());
 
-      // guarda info básica para autofill
       const userInfo = { id: context?.user?.id || null, email: context?.user?.email || null };
       const sid = req.body?.sessionId ?? req.body?.context?.sessionId ?? 'default';
       setUserInfo(sid, userInfo);
@@ -63,19 +60,16 @@ export function makeMessageController(contextFactory) {
       // ⬇️ Factory por request
       const perReqCtxFactory = makePerReqFactory(req);
 
-      // 👀 Peek de sesión para redirecciones contextuales
+      // 👀 Redirección contextual a billing.missing si estás en el wizard
       try {
         const peekCtx = perReqCtxFactory ? perReqCtxFactory() : null;
         const s = peekCtx?.session || {};
-        // Redirigir faltantes genéricos al checker de billing si estamos en el wizard
         if (resolvedAction === 'fill.missing' && s?.selectedTemplateId === 'billing.registerRFC') {
           resolvedAction = 'billing.missing';
         }
-      } catch (_) {
-        // si fallara el peek, no bloqueamos el flujo
-      }
+      } catch (_) {}
 
-      // Ejecutar tool pasando la factory por request
+      // Ejecutar tool
       const toolFactory = getTool(resolvedAction);
       const toolOrRunner = await toolFactory(perReqCtxFactory);
       const runner = (typeof toolOrRunner === 'function') ? toolOrRunner : await toolFactory(perReqCtxFactory);
@@ -90,7 +84,6 @@ export function makeMessageController(contextFactory) {
       if (resolvedAction === 'fill.missing') {
         return res.json(okReply(formatFillMissing(result), { result }));
       }
-      // ✅ NUEVO: billing.missing usa el mismo formateador que fill.missing
       if (resolvedAction === 'billing.missing') {
         return res.json(okReply(formatFillMissing(result), { result }));
       }
@@ -100,24 +93,31 @@ export function makeMessageController(contextFactory) {
       if (resolvedAction === 'fill.apply') {
         return res.json(okReply(formatFillApply(result), { result }));
       }
-      
-      // AÑADIDO: Formateador para documents.create
-      if (resolvedAction === 'documents.create') { 
+
+      // AÑADIDO: documents.create
+      if (resolvedAction === 'documents.create') {
         return res.json(okReply(formatDocumentsCreate(result), { result }));
       }
-      
-      // Manejar invoices.create con su formateador
-      if (resolvedAction === 'invoices.create') { 
+
+      // AÑADIDO: invoices.create
+      if (resolvedAction === 'invoices.create') {
         return res.json(okReply(formatInvoicesCreate(result), { result }));
       }
 
-      // billing (wizard Activar facturación)
+      // 🔧 billing (usar mensaje del resultado si existe)
       if (resolvedAction === 'billing.contract') {
-        return res.json(okReply(formatBillingContract(result), { result }));
+        const msg = result?.message || formatBillingContract(result);
+        return res.json(okReply(msg, { result }));
       }
       if (resolvedAction === 'billing.register') {
-        const ok = !!result?.ok;
-        return res.json(okReply(formatBillingRegister(result), { result, ok }));
+        if (result?.ok) {
+          const msg = result?.message || formatBillingRegister(result);
+          return res.json(okReply(msg, { result, ok: true }));
+        } else {
+          const status = result?.status || 400;
+          const msg = result?.message || formatBillingRegister(result) || '❌ Error activando facturación.';
+          return res.status(status).json(errorReply(msg, status));
+        }
       }
 
       // Default

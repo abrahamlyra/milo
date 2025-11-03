@@ -182,13 +182,13 @@ export function registerBillingTools(contextFactory) {
         contentType: files.key.mimetype || 'application/octet-stream',
       });
 
-      // Base URL robusta
-      const baseUrl =
+      // Base URL robusta (acepta con o sin /api al final)
+      const baseRaw =
         ctx?.config?.lyraApiUrl ||
         ctx?.config?.LYRA_API_URL ||
         process.env.LYRA_API_URL;
 
-      if (!baseUrl) {
+      if (!baseRaw) {
         return {
           ok: false,
           reason: 'missing_base_url',
@@ -197,9 +197,16 @@ export function registerBillingTools(contextFactory) {
         };
       }
 
-      // ✅ Endpoint correcto según tus logs:
-      // POST {base}/api/facturapi/register-rfc
-      const url = `${String(baseUrl).replace(/\/+$/, '')}/api/facturapi/register-rfc`;
+      const base = String(baseRaw).replace(/\/+$/, ''); // sin trailing slash
+      const endsWithApi = /\/api$/.test(base);
+      const endpointPath = endsWithApi
+        ? '/facturapi/register-rfc'
+        : '/api/facturapi/register-rfc';
+
+      const url = base + endpointPath;
+
+      // (Opcional) Log súper ligero para depurar URL final – no rompe nada si no hay consola
+      try { console.log('[billing.register] POST', url); } catch (_) {}
 
       try {
         const { data } = await ctx.http.post(url, form, {
