@@ -2,9 +2,10 @@
 import { makeClient } from "../../core/http/client.js";
 import { config } from "../../config/index.js";
 
-const http = makeClient();
+// crea el cliente con baseURL (requerido por makeClient)
+const http = makeClient({ baseURL: config.lyraApiUrl });
 
 export async function userMe(token) {
-  const url = `${config.lyraApiUrl}/user/me`;
-  return await http.get(url, { token });
+  // al tener baseURL, basta el path relativo
+  return await http.get('/user/me', { token });
 }
