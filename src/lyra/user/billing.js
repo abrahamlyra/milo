@@ -29,8 +29,7 @@ const REQUIRED_FILES = ['cer', 'key'];
 
 /**
  * Construye el "contrato" virtual con tipos/hints básicos.
- * No invadimos templates.*, mantenemos todo encapsulado en billing.*
- * IMPORTANTE: fields como ARRAY (para que fill.missing lo lea bien).
+ * IMPORTANTE: fields como ARRAY (para que fill.missing/formatters lo lean bien).
  */
 function buildBillingContract() {
   return {
@@ -73,6 +72,25 @@ function computeMissing(_contract, provided, metaFiles) {
 }
 
 export function registerBillingTools(contextFactory) {
+  // 0) billing.missing → faltantes **reales** (incluye cer/key desde sesión)
+  registerTool('billing.missing', () => {
+    const ctx = contextFactory();
+    return async () => {
+      const s = ctx.session || {};
+      const tid = s.selectedTemplateId;
+      if (tid !== BILLING_TID) {
+        return { ok: false, reason: 'wrong_context', missing: [], message: 'No estás en el flujo de activación de facturación.' };
+      }
+      const contract =
+        s.contracts?.[tid] ?? s.contract ?? buildBillingContract();
+
+      const provided = (s.provided && s.provided[tid]) || {};
+      const files = s.meta?.billing?.files || {};
+      const missing = computeMissing(contract, provided, files);
+      return { ok: true, missing };
+    };
+  });
+
   // 1) billing.contract → setea contrato virtual y TID en sesión
   registerTool('billing.contract', () => {
     const ctx = contextFactory();
@@ -99,8 +117,8 @@ export function registerBillingTools(contextFactory) {
         },
         message:
           'Listo. Ya tengo el contrato de Activación de Facturación.\n' +
-          'Puedes escribir: "faltantes", "sugerir", "aplicar", "registrar rfc".\n' +
-          'Para subir archivos usa el panel del chat (.cer/.key) y luego pide "faltantes".',
+          'Puedes escribir: "faltantes facturación", "sugerir", "aplicar", "registrar rfc".\n' +
+          'Para subir archivos usa el panel del chat (.cer/.key) y luego pide "faltantes facturación".',
       };
     };
   });
@@ -141,7 +159,7 @@ export function registerBillingTools(contextFactory) {
           reason: 'missing',
           missing,
           message:
-            'Aún faltan campos/archivos para continuar. Escribe "faltantes" para verlos y complétalos.',
+            'Aún faltan campos/archivos para continuar. Escribe "faltantes facturación" para verlos y complétalos.',
         };
       }
 
@@ -161,7 +179,6 @@ export function registerBillingTools(contextFactory) {
       });
 
       // Endpoint real: tu backend que envuelve registerRFC.js
-      // Ajusta SOLO el path si fuera distinto. La baseURL viene de config.lyraApiUrl.
       const url = `${ctx.config.lyraApiUrl}/user/billing/registerRFC`;
 
       try {
@@ -170,7 +187,7 @@ export function registerBillingTools(contextFactory) {
           timeout: 60_000,
         });
 
-        // Opcional: limpiar archivos efímeros tras éxito
+        // limpiar archivos efímeros tras éxito
         if (s.meta?.billing?.files) {
           s.meta.billing.files = {};
         }
