@@ -81,7 +81,7 @@ export function registerBillingTools(contextFactory) {
       const tid = s.selectedTemplateId;
       if (tid !== BILLING_TID) {
         return { ok: false, reason: 'wrong_context', missing: [], message: 'No estás en el flujo de activación de facturación.' };
-        }
+      }
       const contract =
         s.contracts?.[tid] ?? s.contract ?? buildBillingContract();
 
@@ -182,8 +182,22 @@ export function registerBillingTools(contextFactory) {
         contentType: files.key.mimetype || 'application/octet-stream',
       });
 
-      // Endpoint real: tu backend que envuelve registerRFC.js
-      const url = `${ctx.config.lyraApiUrl}/user/billing/registerRFC`;
+      // ✅ baseUrl robusto: toma de ctx.config.lyraApiUrl o de process.env.LYRA_API_URL
+      const baseUrl =
+        ctx?.config?.lyraApiUrl ||
+        ctx?.config?.LYRA_API_URL ||
+        process.env.LYRA_API_URL;
+
+      if (!baseUrl) {
+        return {
+          ok: false,
+          reason: 'missing_base_url',
+          message:
+            'Config faltante: lyraApiUrl. Define LYRA_API_URL en el entorno o agrega lyraApiUrl en ctx.config.',
+        };
+      }
+
+      const url = `${String(baseUrl).replace(/\/+$/, '')}/user/billing/registerRFC`;
 
       try {
         const { data } = await ctx.http.post(url, form, {
