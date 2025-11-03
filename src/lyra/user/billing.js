@@ -127,7 +127,7 @@ export function registerBillingTools(contextFactory) {
     };
   });
 
-  // 2) billing.register → valida faltantes y POST multipart a tu backend (registerRFC.js)
+  // 2) billing.register → valida faltantes y POST multipart al endpoint correcto
   registerTool('billing.register', () => {
     const ctx = contextFactory();
     return async () => {
@@ -182,7 +182,7 @@ export function registerBillingTools(contextFactory) {
         contentType: files.key.mimetype || 'application/octet-stream',
       });
 
-      // ✅ baseUrl robusto: toma de ctx.config.lyraApiUrl o de process.env.LYRA_API_URL
+      // Base URL robusta
       const baseUrl =
         ctx?.config?.lyraApiUrl ||
         ctx?.config?.LYRA_API_URL ||
@@ -197,7 +197,9 @@ export function registerBillingTools(contextFactory) {
         };
       }
 
-      const url = `${String(baseUrl).replace(/\/+$/, '')}/user/billing/registerRFC`;
+      // ✅ Endpoint correcto según tus logs:
+      // POST {base}/api/facturapi/register-rfc
+      const url = `${String(baseUrl).replace(/\/+$/, '')}/api/facturapi/register-rfc`;
 
       try {
         const { data } = await ctx.http.post(url, form, {
