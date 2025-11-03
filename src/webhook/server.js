@@ -11,7 +11,13 @@ import { makeMessagesRouter } from './routes/messages.js';
 import { registerTemplateTools } from '../lyra/templates/index.js';
 import { registerFillTools } from '../lyra/fill/index.js';
 import { registerDocumentTools } from '../lyra/documents/index.js';
-import { registerFacturapiTools } from '../lyra/facturapi/index.js'; 
+import { registerFacturapiTools } from '../lyra/facturapi/index.js';
+
+// NUEVO: registrar herramientas de user (incluye billing)
+import { registerUserTools } from '../lyra/user/index.js';
+
+// NUEVO: router para uploads efímeros de CSD (cer/key) en sesión
+import billingUploads from './routes/billingUploads.js';
 
 const app = express();
 
@@ -48,7 +54,8 @@ const contextFactory = createContextFactory(getCurrentReq);
 registerTemplateTools(contextFactory);
 registerFillTools(contextFactory);
 registerDocumentTools(contextFactory);
-registerFacturapiTools(contextFactory); 
+registerFacturapiTools(contextFactory);
+registerUserTools(contextFactory); // ⬅️ NUEVO: habilita billing.*
 
 /* =========================
    Routes
@@ -56,6 +63,9 @@ registerFacturapiTools(contextFactory);
 app.get('/health', (_req, res) => {
   res.json({ ok: true, tools: listTools() });
 });
+
+// Monta uploads bajo /milo (antes del router de mensajes)
+app.use('/milo', billingUploads);
 
 // Monta router de Milo bajo /milo
 app.use('/milo', makeMessagesRouter(contextFactory, setCurrentReq));

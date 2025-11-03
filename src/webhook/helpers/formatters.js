@@ -131,3 +131,24 @@ export function formatInvoicesCreate(result) {
 
   return `❌ No se pudo facturar (error desconocido).`;
 }
+
+/* === NUEVOS: formatters para wizard de Activar facturación (billing) === */
+export function formatBillingContract(resp) {
+  const r = resp || {};
+  const reqs = (r.contract?.required || []).join(', ');
+  return [
+    '🧩 Activación de facturación lista.',
+    `Requeridos: ${reqs || '(desconocidos)'}`,
+    'Usa: "faltantes", "sugerir", "aplicar", "registrar rfc".'
+  ].join('\n');
+}
+
+export function formatBillingRegister(resp) {
+  if (resp?.ok) {
+    return '✅ Facturación activada: RFC registrado y CSD cargado correctamente.';
+  }
+  if (resp?.reason === 'missing') {
+    return `⚠️ Aún faltan: ${resp.missing.join(', ')}`;
+  }
+  return `❌ Error activando facturación.\n${resp?.message || ''}`;
+}

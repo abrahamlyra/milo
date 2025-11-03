@@ -12,7 +12,10 @@ import {
   formatFillApply,
   // AÑADIDO: Importar los nuevos formateadores
   formatDocumentsCreate,
-  formatInvoicesCreate,          // ⬅️ NUEVO: Importación del formateador de facturas
+  formatInvoicesCreate,
+  // NUEVOS: billing
+  formatBillingContract,
+  formatBillingRegister,
 } from '../helpers/formatters.js';
 
 export function makeMessageController(contextFactory) {
@@ -90,6 +93,15 @@ export function makeMessageController(contextFactory) {
       // ⬅️ NUEVO: Manejar invoices.create con su formateador
       if (resolvedAction === 'invoices.create') { 
         return res.json(okReply(formatInvoicesCreate(result), { result }));
+      }
+
+      // ⬅️ NUEVOS: billing (wizard Activar facturación)
+      if (resolvedAction === 'billing.contract') {
+        return res.json(okReply(formatBillingContract(result), { result }));
+      }
+      if (resolvedAction === 'billing.register') {
+        const ok = !!result?.ok;
+        return res.json(okReply(formatBillingRegister(result), { result, ok }));
       }
 
       // Default

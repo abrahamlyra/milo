@@ -25,6 +25,16 @@ const NATURAL_ALIASES = [
   { re: /^(?:facturar|generar\s+factura)$/i,     action: 'invoices.create',    args: () => ({}) }, // ⬅️ Alias ya agregado
   { re: /^aplicar$/i,                            action: 'fill.apply',         args: () => ({}) },
   { re: /^set\s+.+$/i,                           action: 'fill.set',           args: m => ({ __raw: m[0] }) },
+
+  // === NUEVOS: Wizard de Activar facturación (billing) ===
+  { re: /^(activar\s+facturaci[oó]n|activar\s+csd|registro\s+rfc|alta\s+csd)$/i,
+    action: 'billing.contract', args: () => ({}) },
+  { re: /^(faltantes\s+facturaci[oó]n|faltantes\s+csd|faltantes\s+rfc)$/i,
+    action: 'fill.missing', args: () => ({}) },
+  { re: /^(sugerir\s+facturaci[oó]n|sugerir\s+csd)$/i,
+    action: 'fill.suggest', args: () => ({}) },
+  { re: /^(registrar\s+rfc|confirmar\s+facturaci[oó]n|activar\s+facturaci[oó]n\s+ahora)$/i,
+    action: 'billing.register', args: () => ({}) },
 ];
 
 /** Intenta mapear texto a { action, input } */
@@ -61,7 +71,7 @@ export function resolveActionAndInputFromMessage(msg) {
 
 /** Mensaje inicial por defecto */
 export function initialHelpMessage() {
-  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, `facturar`, o `set key=valor`.'; // ⬅️ MENSAJE ACTUALIZADO
+  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, `facturar`, o `set key=valor`.';
 }
 
 export { listTools };
