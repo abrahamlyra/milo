@@ -1,4 +1,3 @@
-// src/lyra/user/billing.js
 import FormData from 'form-data';
 import { registerTool } from '../../core/nlu/intentRouter.js';
 
@@ -31,6 +30,7 @@ const REQUIRED_FILES = ['cer', 'key'];
 /**
  * Construye el "contrato" virtual con tipos/hints básicos.
  * No invadimos templates.*, mantenemos todo encapsulado en billing.*
+ * IMPORTANTE: fields como ARRAY (para que fill.missing lo lea bien).
  */
 function buildBillingContract() {
   return {
@@ -38,25 +38,25 @@ function buildBillingContract() {
     type: 'billing.registerRFC',
     title: 'Activar facturación (Registro RFC + CSD)',
     required: [...REQUIRED_FIELDS, ...REQUIRED_FILES],
-    fields: {
-      name: { type: 'string', label: 'Nombre de organización (Facturapi)' },
-      razon_social: { type: 'string', label: 'Razón social' },
-      regimen_fiscal: { type: 'string', label: 'Régimen fiscal' },
-      codigo_postal: { type: 'string', label: 'Código postal' },
-      calle: { type: 'string', label: 'Calle' },
-      exterior: { type: 'string', label: 'Número exterior' },
-      colonia: { type: 'string', label: 'Colonia' },
-      ciudad: { type: 'string', label: 'Ciudad' },
-      municipio: { type: 'string', label: 'Municipio' },
-      estado: { type: 'string', label: 'Estado' },
-      csd_password: { type: 'string', label: 'Contraseña del CSD' },
-      cer: { type: 'file', label: 'Archivo .cer' },
-      key: { type: 'file', label: 'Archivo .key' },
-    },
+    fields: [
+      { key: 'name',            type: 'string', required: true, label: 'Nombre de organización (Facturapi)' },
+      { key: 'razon_social',    type: 'string', required: true, label: 'Razón social' },
+      { key: 'regimen_fiscal',  type: 'string', required: true, label: 'Régimen fiscal' },
+      { key: 'codigo_postal',   type: 'string', required: true, label: 'Código postal' },
+      { key: 'calle',           type: 'string', required: true, label: 'Calle' },
+      { key: 'exterior',        type: 'string', required: true, label: 'Número exterior' },
+      { key: 'colonia',         type: 'string', required: true, label: 'Colonia' },
+      { key: 'ciudad',          type: 'string', required: true, label: 'Ciudad' },
+      { key: 'municipio',       type: 'string', required: true, label: 'Municipio' },
+      { key: 'estado',          type: 'string', required: true, label: 'Estado' },
+      { key: 'csd_password',    type: 'string', required: true, label: 'Contraseña del CSD' },
+      { key: 'cer',             type: 'file',   required: true, label: 'Archivo .cer' },
+      { key: 'key',             type: 'file',   required: true, label: 'Archivo .key' },
+    ],
   };
 }
 
-function computeMissing(contract, provided, metaFiles) {
+function computeMissing(_contract, provided, metaFiles) {
   const missing = [];
   for (const f of REQUIRED_FIELDS) {
     const v = provided?.[f];
@@ -100,7 +100,7 @@ export function registerBillingTools(contextFactory) {
         message:
           'Listo. Ya tengo el contrato de Activación de Facturación.\n' +
           'Puedes escribir: "faltantes", "sugerir", "aplicar", "registrar rfc".\n' +
-          'Para subir archivos usa el endpoint de upload del bot (cer/key) y luego vuelve a pedir "faltantes".',
+          'Para subir archivos usa el panel del chat (.cer/.key) y luego pide "faltantes".',
       };
     };
   });
