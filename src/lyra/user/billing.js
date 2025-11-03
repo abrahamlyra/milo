@@ -1,3 +1,4 @@
+// src/lyra/user/billing.js
 import FormData from 'form-data';
 import { registerTool } from '../../core/nlu/intentRouter.js';
 
@@ -80,7 +81,7 @@ export function registerBillingTools(contextFactory) {
       const tid = s.selectedTemplateId;
       if (tid !== BILLING_TID) {
         return { ok: false, reason: 'wrong_context', missing: [], message: 'No estás en el flujo de activación de facturación.' };
-      }
+        }
       const contract =
         s.contracts?.[tid] ?? s.contract ?? buildBillingContract();
 
@@ -104,8 +105,11 @@ export function registerBillingTools(contextFactory) {
       s.contracts = { ...(s.contracts || {}), [BILLING_TID]: contract };
       s.provided = s.provided || {};
       s.provided[BILLING_TID] = s.provided[BILLING_TID] || {};
+
+      // ✅ Asegurar estructura sin re-inicializar si ya existe
       s.meta = s.meta || {};
-      s.meta.billing = s.meta.billing || { files: {} };
+      s.meta.billing = s.meta.billing || {};
+      s.meta.billing.files = s.meta.billing.files || {};
 
       return {
         ok: true,

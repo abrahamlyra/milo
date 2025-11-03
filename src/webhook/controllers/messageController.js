@@ -63,6 +63,18 @@ export function makeMessageController(contextFactory) {
       // ⬇️ Factory por request
       const perReqCtxFactory = makePerReqFactory(req);
 
+      // 👀 Peek de sesión para redirecciones contextuales
+      try {
+        const peekCtx = perReqCtxFactory ? perReqCtxFactory() : null;
+        const s = peekCtx?.session || {};
+        // Redirigir faltantes genéricos al checker de billing si estamos en el wizard
+        if (resolvedAction === 'fill.missing' && s?.selectedTemplateId === 'billing.registerRFC') {
+          resolvedAction = 'billing.missing';
+        }
+      } catch (_) {
+        // si fallara el peek, no bloqueamos el flujo
+      }
+
       // Ejecutar tool pasando la factory por request
       const toolFactory = getTool(resolvedAction);
       const toolOrRunner = await toolFactory(perReqCtxFactory);
@@ -78,6 +90,10 @@ export function makeMessageController(contextFactory) {
       if (resolvedAction === 'fill.missing') {
         return res.json(okReply(formatFillMissing(result), { result }));
       }
+      // ✅ NUEVO: billing.missing usa el mismo formateador que fill.missing
+      if (resolvedAction === 'billing.missing') {
+        return res.json(okReply(formatFillMissing(result), { result }));
+      }
       if (resolvedAction === 'fill.suggest') {
         return res.json(okReply(formatFillSuggest(result), { result }));
       }
@@ -90,12 +106,12 @@ export function makeMessageController(contextFactory) {
         return res.json(okReply(formatDocumentsCreate(result), { result }));
       }
       
-      // ⬅️ NUEVO: Manejar invoices.create con su formateador
+      // Manejar invoices.create con su formateador
       if (resolvedAction === 'invoices.create') { 
         return res.json(okReply(formatInvoicesCreate(result), { result }));
       }
 
-      // ⬅️ NUEVOS: billing (wizard Activar facturación)
+      // billing (wizard Activar facturación)
       if (resolvedAction === 'billing.contract') {
         return res.json(okReply(formatBillingContract(result), { result }));
       }

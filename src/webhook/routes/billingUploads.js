@@ -47,6 +47,15 @@ router.post('/user/billing/upload', upload.single('file'), async (req, res) => {
       uploadedAt: Date.now(),
     };
 
+    // 🔎 Log de depuración ligero (quitar si no lo quieres en prod)
+    try {
+      // Evitar tirar el request si el log fallara
+      // Muestra claves presentes después de guardar y tamaño del archivo
+      const keys = Object.keys(session.meta.billing.files || {});
+      // eslint-disable-next-line no-console
+      console.log('[UPLOAD]', req.query, { hasSession: !!session, keys, size: req.file.size });
+    } catch (_) {}
+
     return res.json({
       ok: true,
       saved: kind,
