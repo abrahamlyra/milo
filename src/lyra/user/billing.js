@@ -1,17 +1,8 @@
-// src/lyra/user/billing.js
 import FormData from 'form-data';
 import { registerTool } from '../../core/nlu/intentRouter.js';
 
-/**
- * ID lógico para este "contrato virtual" dentro del wizard (no es plantilla real).
- * Lo usamos igual que selectedTemplateId en templates, para que fill.* funcione igual.
- */
 const BILLING_TID = 'billing.registerRFC';
 
-/**
- * Campos requeridos derivados 100% de tu controlador registerRFC.js
- * (fuente de la verdad). Incluye los 2 archivos (cer/key).
- */
 const REQUIRED_FIELDS = [
   'name',
   'razon_social',
@@ -28,10 +19,24 @@ const REQUIRED_FIELDS = [
 
 const REQUIRED_FILES = ['cer', 'key'];
 
-/**
- * Construye el "contrato" virtual con tipos/hints básicos.
- * IMPORTANTE: fields como ARRAY (para que fill.missing/formatters lo lean bien).
- */
+/** Quita acentos y pasa a MAYÚSCULAS (espacios colapsados). */
+function toUpperNoAccents(s) {
+  if (s == null) return '';
+  return String(s)
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+/** CP seguro de 5 dígitos, preservando ceros a la izquierda. */
+function asZip5(v) {
+  // aceptamos string o number; forzamos string y rellenamos a 5
+  const raw = v == null ? '' : String(v).replace(/\D/g, ''); // solo dígitos
+  return raw.padStart(5, '0').slice(-5);
+}
+
 function buildBillingContract() {
   return {
     id: BILLING_TID,
@@ -73,7 +78,6 @@ function computeMissing(_contract, provided, metaFiles) {
 }
 
 export function registerBillingTools(contextFactory) {
-  // 0) billing.missing → faltantes **reales** (incluye cer/key desde sesión)
   registerTool('billing.missing', () => {
     const ctx = contextFactory();
     return async () => {
@@ -92,21 +96,18 @@ export function registerBillingTools(contextFactory) {
     };
   });
 
-  // 1) billing.contract → setea contrato virtual y TID en sesión
   registerTool('billing.contract', () => {
     const ctx = contextFactory();
     return async () => {
       const s = ctx.session || {};
       const contract = buildBillingContract();
 
-      // Persistimos estilo templates.contract
       s.selectedTemplateId = BILLING_TID;
       s.contract = contract;
       s.contracts = { ...(s.contracts || {}), [BILLING_TID]: contract };
       s.provided = s.provided || {};
       s.provided[BILLING_TID] = s.provided[BILLING_TID] || {};
 
-      // ✅ Asegurar estructura sin re-inicializar si ya existe
       s.meta = s.meta || {};
       s.meta.billing = s.meta.billing || {};
       s.meta.billing.files = s.meta.billing.files || {};
@@ -127,7 +128,6 @@ export function registerBillingTools(contextFactory) {
     };
   });
 
-  // 2) billing.register → valida faltantes y POST multipart al endpoint correcto
   registerTool('billing.register', () => {
     const ctx = contextFactory();
     return async () => {
@@ -156,7 +156,6 @@ export function registerBillingTools(contextFactory) {
       const provided = (s.provided && s.provided[tid]) || {};
       const files = s.meta?.billing?.files || {};
       const missing = computeMissing(contract, provided, files);
-
       if (missing.length > 0) {
         return {
           ok: false,
@@ -167,11 +166,26 @@ export function registerBillingTools(contextFactory) {
         };
       }
 
+      // ====== Normalizaciones seguras ANTES de enviar ======
+      const razonSocialNorm = toUpperNoAccents(provided['razon_social']);
+      const zip5 = asZip5(provided['codigo_postal']); // preserva 0 a la izquierda
+
       // Construir multipart
       const form = new FormData();
       for (const f of REQUIRED_FIELDS) {
-        form.append(f, String(provided[f] ?? ''));
+        let val = provided[f];
+
+        if (f === 'razon_social') {
+          val = razonSocialNorm;
+        } else if (f === 'codigo_postal') {
+          val = zip5;
+        } else {
+          val = String(val ?? '');
+        }
+
+        form.append(f, val);
       }
+
       // Adjuntar .cer y .key desde sesión (buffers en memoria)
       form.append('cer', files.cer.buffer, {
         filename: files.cer.filename || 'csd.cer',
@@ -197,16 +211,12 @@ export function registerBillingTools(contextFactory) {
         };
       }
 
-      const base = String(baseRaw).replace(/\/+$/, ''); // sin trailing slash
+      const base = String(baseRaw).replace(/\/+$/, '');
       const endsWithApi = /\/api$/.test(base);
       const endpointPath = endsWithApi
         ? '/facturapi/register-rfc'
         : '/api/facturapi/register-rfc';
-
       const url = base + endpointPath;
-
-      // (Opcional) Log súper ligero para depurar URL final – no rompe nada si no hay consola
-      try { console.log('[billing.register] POST', url); } catch (_) {}
 
       try {
         const { data } = await ctx.http.post(url, form, {
@@ -228,14 +238,20 @@ export function registerBillingTools(contextFactory) {
         };
       } catch (err) {
         const status = err?.response?.status;
-        const payload = err?.response?.data;
+        const be = err?.response?.data;
+
+        // Extraer detalle útil si viene del backend (Facturapi/validación)
+        const beMsg = be?.message || be?.error || be;
+        const bePath = be?.path ? ` (campo: ${be.path})` : '';
+        const detail = beMsg ? `Detalle: ${beMsg}${bePath}` : String(err);
+
         return {
           ok: false,
           reason: 'backend_error',
-          status,
-          error: payload || String(err),
+          status: status || 500,
+          error: be || String(err),
           message:
-            '❌ Falló el registro de RFC/CSD en backend. Revisa logs del servicio y los datos enviados.',
+            `❌ Falló el registro de RFC/CSD en backend. ${detail}`,
         };
       }
     };
