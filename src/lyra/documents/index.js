@@ -45,7 +45,7 @@ export function registerDocumentTools(contextFactory) {
       // 2) Normalizar tipos conforme al contract
       const normalized = normalizeByContract(contract, provided);
 
-      // 3) POST /documents (PARCHE ROBUSTO AQUÍ)
+      // 3) POST /documents (inyectando entrega si existe en sesión)
       try {
         // Asegura que data no esté vacía
         const hasData = normalized && typeof normalized === 'object' && Object.keys(normalized).length > 0;
@@ -57,7 +57,32 @@ export function registerDocumentTools(contextFactory) {
             message: 'No hay datos para generar el documento.',
           };
         }
-      
+
+        // ====== Lectura NO intrusiva de la preferencia de entrega capturada en fill.delivery ======
+        // Estructura esperada en sesión (por plantilla):
+        //   s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
+        const delivery = s.delivery?.[tid] || { mode: 'none' };
+        const mode = String(delivery.mode || 'none').toLowerCase();
+        const wantsEmail = mode === 'email' || mode === 'both';
+        const wantsSms   = mode === 'sms'   || mode === 'both';
+
+        // Derivar destinatarios de manera tolerante:
+        // - Para correo: toma email.to si existe; si no, intenta string directo en delivery.email;
+        //   como último recurso, _input.email o s.user?.email (sin inventar estructura nueva).
+        const emailTo =
+          delivery?.email?.to ??
+          (typeof delivery?.email === 'string' ? delivery.email : undefined) ??
+          _input?.email ??
+          s.user?.email ??
+          undefined;
+
+        // - Para SMS: toma sms.toE164 si existe; si no, intenta sms.to (por si lo capturaron así) o _input.phone
+        const phoneTo =
+          delivery?.sms?.toE164 ??
+          delivery?.sms?.to ??
+          _input?.phone ??
+          undefined;
+
         // 🔑 La API espera template_id (snake_case). Mandamos ambos por compat.
         const body = {
           template_id: tid,
@@ -65,8 +90,19 @@ export function registerDocumentTools(contextFactory) {
           data: normalized,
         };
 
+        // Inyectar flags/valores SOLO si existen y fueron solicitados
+        if (wantsEmail && emailTo) body.email = emailTo;
+        if (wantsSms && phoneTo)  body.phone = phoneTo;
+
         // Log de inicio de la llamada a la API
-        console.log('📝 documents.create → POST /documents', { templateId: tid, withData: hasData });
+        console.log('📝 documents.create → POST /documents', {
+          templateId: tid,
+          withData: hasData,
+          wantsEmail,
+          wantsSms,
+          hasEmailTo: Boolean(emailTo),
+          hasPhoneTo: Boolean(phoneTo),
+        });
 
         const res = await ctx.http.post('/documents', body, {
           headers: { 'Content-Type': 'application/json' }, // por si acaso

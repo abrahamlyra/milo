@@ -53,6 +53,49 @@ function applyNormalizers(key, value) {
   return value;
 }
 
+// ===== Helpers de entrega (notificaciones) =====
+const DELIVERY_MODES = new Set(['none', 'email', 'sms', 'both']);
+
+function coerceMode(val) {
+  if (!val) return 'none';
+  const t = String(val).trim().toLowerCase();
+  if (DELIVERY_MODES.has(t)) return t;
+  // alias rápidos
+  if (t === 'correo') return 'email';
+  if (t === 'ambos') return 'both';
+  return 'none';
+}
+
+function setDeep(target, dottedKey, value) {
+  if (!dottedKey || typeof dottedKey !== 'string') return;
+  const parts = dottedKey.split('.');
+  let ref = target;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const p = parts[i];
+    if (ref[p] == null || typeof ref[p] !== 'object') ref[p] = {};
+    ref = ref[p];
+  }
+  ref[parts[parts.length - 1]] = value;
+}
+
+function parseRawKV(raw) {
+  // Acepta letras, números, guion bajo, punto y corchetes en la KEY
+  // Ej: mode=email email.to="cliente@dominio.com" sms.toE164=+525512345678
+  const out = {};
+  const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+  let r;
+  while ((r = re.exec(raw)) !== null) {
+    const key = r[1];
+    const rawVal = r[3] ?? r[4] ?? r[2];
+    const cast =
+      /^[0-9]+(\.[0-9]+)?$/.test(rawVal) ? Number(rawVal)
+      : /^(true|false)$/i.test(rawVal) ? /^true$/i.test(rawVal)
+      : rawVal;
+    out[key] = cast;
+  }
+  return out;
+}
+
 export function registerFillTools(contextFactory) {
   /* =========================
   	faltantes
@@ -271,6 +314,86 @@ export function registerFillTools(contextFactory) {
 
       const missing = computeMissing(contract, target);
       return { templateId: tid, provided: target, missing };
+    };
+  });
+
+  /* =========================
+  	ENTREGA (notificaciones) — NUEVO
+  	- Guarda preferencia y datos de envío en s.delivery[tid]
+  	- No toca contract ni provided para no afectar "missing"
+  ========================= */
+  registerTool('fill.delivery', async () => {
+    const ctx = contextFactory();
+    return async (input = {}) => {
+      const { tid, s } = getCtxState(ctx);
+
+      // Estado actual (por plantilla)
+      s.delivery = s.delivery || {};
+      const current = s.delivery[tid] || { mode: 'none' };
+
+      // Soporta __raw: "mode=email email.to=cliente@dominio.com sms.toE164=+525512345678"
+      const { __raw, ...rest } = input || {};
+      const flat = { ...rest };
+      if (typeof __raw === 'string' && __raw.trim().length) {
+        Object.assign(flat, parseRawKV(__raw));
+      }
+
+      // Construye el siguiente estado sin romper lo existente
+      const next = {
+        mode: current.mode || 'none',
+        email: { ...(current.email || {}) },
+        sms: { ...(current.sms || {}) },
+      };
+
+      // Permite mode a nivel raíz
+      if (flat.mode !== undefined) {
+        next.mode = coerceMode(flat.mode);
+      }
+
+      // Permite objetos anidados: { email: {...}, sms: {...} }
+      if (flat.email && typeof flat.email === 'object') {
+        next.email = { ...next.email, ...flat.email };
+      }
+      if (flat.sms && typeof flat.sms === 'object') {
+        next.sms = { ...next.sms, ...flat.sms };
+      }
+
+      // Permite setDeep con claves punteadas en __raw: "email.to=... sms.message=..."
+      for (const [k, v] of Object.entries(flat)) {
+        if (k === 'mode' || k === 'email' || k === 'sms') continue;
+        if (typeof k === 'string' && k.includes('.')) {
+          setDeep(next, k, v);
+        }
+      }
+
+      // Persistir
+      s.delivery[tid] = next;
+
+      // Respuesta
+      return {
+        templateId: tid,
+        delivery: next
+      };
+    };
+  });
+
+  // Consultar entrega actual
+  registerTool('fill.delivery.get', async () => {
+    const ctx = contextFactory();
+    return async () => {
+      const { tid, s } = getCtxState(ctx);
+      const delivery = s.delivery?.[tid] || { mode: 'none' };
+      return { templateId: tid, delivery };
+    };
+  });
+
+  // Reset de entrega (por plantilla)
+  registerTool('fill.delivery.reset', async () => {
+    const ctx = contextFactory();
+    return async () => {
+      const { tid, s } = getCtxState(ctx);
+      if (s.delivery && s.delivery[tid]) delete s.delivery[tid];
+      return { templateId: tid, delivery: { mode: 'none' } };
     };
   });
 }

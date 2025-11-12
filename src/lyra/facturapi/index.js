@@ -47,37 +47,66 @@ export function registerFacturapiTools(contextFactory) {
 
       // 🔒 Guardado final: jamás salgas sin payment_form
       if (!datos_factura.payment_form || String(datos_factura.payment_form).trim() === '') {
-        // Usa la sesión original para acceder a lo que el usuario proporcionó
         const fallback =
           s.provided?.[tid]?.payment_form ??
           contract?.defaults?.payment_form ??
           s.provided?.[tid]?.forma_pago;
-    
+
         if (fallback) {
-          // Aplica el mismo padding ('3' → '03')
           datos_factura.payment_form = String(fallback).padStart(2, '0');
         }
       }
 
-      // Modo: tolera 'mode' o 'modo', y 'test' por default
+      // ====== Lectura NO intrusiva de preferencia de entrega capturada en fill.delivery ======
+      //   s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
+      const delivery = s.delivery?.[tid] || { mode: 'none' };
+      const mode = String(delivery.mode || 'none').toLowerCase();
+      const wantsEmail = mode === 'email' || mode === 'both';
+      const wantsSms   = mode === 'sms'   || mode === 'both';
+
+      // Derivar destinatarios de manera tolerante:
+      const emailTo =
+        delivery?.email?.to ??
+        (typeof delivery?.email === 'string' ? delivery.email : undefined) ??
+        _input?.email ??
+        s.user?.email ??
+        undefined;
+
+      const phoneTo =
+        delivery?.sms?.toE164 ??
+        delivery?.sms?.to ??
+        _input?.phone ??
+        undefined;
+
+      // Modo de operación (test/producción) heredado de inputs/meta
       const modeInput = _input.mode ?? _input.modo ?? s.meta?.mode ?? s.meta?.modo ?? 'test';
+
+      // Si no hay destinatarios válidos, no forzar envío
+      const shouldSend = (wantsEmail && !!emailTo) || (wantsSms && !!phoneTo);
 
       const body = {
         template_id: tid,
         datos_factura,
-        email: _input.email || s.user?.email || undefined,
-        phone: _input.phone || undefined,
-        modo: modeInput,           // usa 'mode' (ajústalo a 'modo' si tu backend lo espera así)
-        skipSend: _input.skipSend ?? true,
+        // Inyectar email/phone SOLO si existen
+        ...(emailTo ? { email: emailTo } : {}),
+        ...(phoneTo ? { phone: phoneTo } : {}),
+        modo: modeInput,                           // si tu backend espera 'modo', se respeta
+        skipSend: _input.skipSend ?? !shouldSend,  // si hay intención y destinatarios, no saltar envío
       };
-      
+
       // 1) Log de verificación justo antes del POST
-      console.log('🧾 FACTURA → payload:', {
+      console.log('🧾 FACTURA → payload (verificación)', {
+        templateId: tid,
         payment_form: datos_factura.payment_form,
         payment_method: datos_factura.payment_method,
         currency: datos_factura.currency,
         type: datos_factura.type,
         items_len: Array.isArray(datos_factura.items) ? datos_factura.items.length : 0,
+        wantsEmail,
+        wantsSms,
+        hasEmailTo: Boolean(emailTo),
+        hasPhoneTo: Boolean(phoneTo),
+        skipSend: body.skipSend,
       });
 
       try {
