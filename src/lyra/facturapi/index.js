@@ -1,186 +1,177 @@
-// src/lyra/facturapi/index.js
+// src/lyra/documents/index.js
 import { registerTool } from '../../core/nlu/intentRouter.js';
-import { buildFacturaPayloadData } from './payloadBuilder.js';
 
-export function registerFacturapiTools(contextFactory) {
-  registerTool('invoices.create', () => {
+/**
+ * documents.create
+ * - Lee templateId y provided[tid] desde sesión
+ * - Valida faltantes igual que fill.missing (soporta "items[].campo")
+ * - Normaliza tipos conforme al contract antes del POST
+ * - Hace POST /documents y devuelve { ok, id, url|pdfUrl|signedUrl }
+ */
+export function registerDocumentTools(contextFactory) {
+  registerTool('documents.create', () => {
     const ctx = contextFactory();
     return async (_input = {}) => {
       const s = ctx.session || {};
       const tid = s.selectedTemplateId;
       if (!tid) throw new Error('No hay plantilla seleccionada. Usa: usar <templateId>');
 
+      // Contract tolerante (por plantilla o plano)
       const contract = s.contracts?.[tid] ?? s.contract ?? null;
       if (!contract) throw new Error('Contract no cargado para esta plantilla.');
 
-      const type = String(contract.type || '').toLowerCase();
-      if (!(type.includes('invoice') || type.includes('factura'))) {
-        return {
-          ok: false,
-          reason: 'wrong_type',
-          message: `La plantilla seleccionada no es de tipo factura (${contract.type || 'sin tipo'}). Usa "generar" para documentos normales.`,
-        };
-      }
-
+      // Datos provistos por el usuario (guardados durante sugerir/aplicar)
       const provided = (s.provided && s.provided[tid]) ? s.provided[tid] : {};
 
-      // Requeridos
+      // Reglas de requeridos; si la versión del contract ya trae "required" úsala,
+      // si no, constrúyela a partir de fields[] marcados como required.
       const requiredKeys = Array.isArray(contract.required) && contract.required.length
         ? contract.required
         : (Array.isArray(contract.fields)
             ? contract.fields.filter(f => f?.required).map(f => f.key).filter(Boolean)
             : []);
+
+      // 1) Validar faltantes igual que fill.missing
       const missing = computeMissing(requiredKeys, provided);
       if (missing.length) {
-        return { ok: false, reason: 'missing', missing, message: `Faltan campos requeridos: ${missing.join(', ')}` };
+        return {
+          ok: false,
+          reason: 'missing',
+          missing,
+          message: `Faltan campos requeridos: ${missing.join(', ')}`
+        };
       }
 
-      // Normaliza según type de cada field (planos + items)
+      // 2) Normalizar tipos conforme al contract
       const normalized = normalizeByContract(contract, provided);
 
-      // Arma el payload que consume Facturapi (usando pistas del contract)
-      const datos_factura = buildFacturaPayloadData({
-        contract,
-        fields: normalized,
-        fields_filled: normalized,
-      });
-
-      // 🔒 Guardado final: jamás salgas sin payment_form
-      if (!datos_factura.payment_form || String(datos_factura.payment_form).trim() === '') {
-        const fallback =
-          s.provided?.[tid]?.payment_form ??
-          contract?.defaults?.payment_form ??
-          s.provided?.[tid]?.forma_pago;
-
-        if (fallback) {
-          datos_factura.payment_form = String(fallback).padStart(2, '0');
-        }
-      }
-
-      // 🔧 Asegurar ceros a la izquierda en payment_form (sin tocar nada más)
-      if (datos_factura.payment_form != null) {
-        const pf = String(datos_factura.payment_form).trim();
-        if (/^\d{1,2}$/.test(pf)) {
-          datos_factura.payment_form = pf.padStart(2, '0');
-        }
-      }
-
-      // ====== Lectura NO intrusiva de preferencia de entrega capturada en fill.delivery ======
-      //   s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
-      const delivery = s.delivery?.[tid] || { mode: 'none' };
-      const mode = String(delivery.mode || 'none').toLowerCase();
-      const wantsEmail = mode === 'email' || mode === 'both';
-      const wantsSms   = mode === 'sms'   || mode === 'both';
-
-      // Derivar destinatarios de manera tolerante:
-      const emailTo =
-        delivery?.email?.to ??
-        (typeof delivery?.email === 'string' ? delivery.email : undefined) ??
-        _input?.email ??
-        s.user?.email ??
-        undefined;
-
-      const phoneTo =
-        delivery?.sms?.toE164 ??
-        delivery?.sms?.to ??
-        _input?.phone ??
-        undefined;
-
-      // Modo de operación (test/producción) heredado de inputs/meta
-      const modeInput = _input.mode ?? _input.modo ?? s.meta?.mode ?? s.meta?.modo ?? 'test';
-
-      // Si no hay destinatarios válidos, no forzar envío
-      const shouldSend = (wantsEmail && !!emailTo) || (wantsSms && !!phoneTo);
-
-      const body = {
-        template_id: tid,
-        datos_factura,
-        // Inyectar email/phone SOLO si existen
-        ...(emailTo ? { email: emailTo } : {}),
-        ...(phoneTo ? { phone: phoneTo } : {}),
-        modo: modeInput,                           // si tu backend espera 'modo', se respeta
-        skipSend: _input.skipSend ?? !shouldSend,  // si hay intención y destinatarios, no saltar envío
-      };
-
-      // 1) Log de verificación justo antes del POST
-      console.log('🧾 FACTURA → payload (verificación)', {
-        templateId: tid,
-        payment_form: datos_factura.payment_form,
-        payment_method: datos_factura.payment_method,
-        currency: datos_factura.currency,
-        type: datos_factura.type,
-        items_len: Array.isArray(datos_factura.items) ? datos_factura.items.length : 0,
-        wantsEmail,
-        wantsSms,
-        hasEmailTo: Boolean(emailTo),
-        hasPhoneTo: Boolean(phoneTo),
-        skipSend: body.skipSend,
-      });
-
+      // 3) POST /documents (inyectando entrega si existe en sesión)
       try {
-        console.log('🧾 invoices.create → POST /facturapi/factura-completa', { templateId: tid });
-        const res = await ctx.http.post('/facturapi/factura-completa', body, {
-          headers: { 'Content-Type': 'application/json' },
+        // Asegura que data no esté vacía
+        const hasData = normalized && typeof normalized === 'object' && Object.keys(normalized).length > 0;
+        if (!hasData) {
+          return {
+            ok: false,
+            reason: 'missing',
+            missing: ['data'],
+            message: 'No hay datos para generar el documento.',
+          };
+        }
+
+        // ====== Lectura NO intrusiva de la preferencia de entrega capturada en fill.delivery ======
+        //   s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
+        const delivery = s.delivery?.[tid] || { mode: 'none' };
+        const mode = String(delivery.mode || 'none').toLowerCase();
+        const wantsEmail = mode === 'email' || mode === 'both';
+        const wantsSms   = mode === 'sms'   || mode === 'both';
+
+        // Derivar destinatarios de manera tolerante
+        const emailTo =
+          delivery?.email?.to ??
+          (typeof delivery?.email === 'string' ? delivery.email : undefined) ??
+          _input?.email ??
+          s.user?.email ??
+          undefined;
+
+        const phoneTo =
+          delivery?.sms?.toE164 ??
+          delivery?.sms?.to ??
+          _input?.phone ??
+          undefined;
+
+        // 🔑 La API espera template_id (snake_case). Mandamos ambos por compat.
+        const body = {
+          template_id: tid,
+          templateId: tid,
+          data: normalized,
+        };
+
+        // Inyectar flags/valores SOLO si existen y fueron solicitados
+        if (wantsEmail && emailTo) body.email = emailTo;
+        if (wantsSms && phoneTo)  body.phone = phoneTo;
+
+        // Log de inicio de la llamada a la API
+        console.log('📝 documents.create → POST /documents', {
+          templateId: tid,
+          withData: hasData,
+          wantsEmail,
+          wantsSms,
+          hasEmailTo: Boolean(emailTo),
+          hasPhoneTo: Boolean(phoneTo),
         });
+
+        const res = await ctx.http.post('/documents', body, {
+          headers: { 'Content-Type': 'application/json' }, // por si acaso
+        });
+
         const data = res?.data || {};
+        const url = data.pdfUrl || data.url || data.signedUrl || null;
+
+        // Log de fin de la llamada
+        console.log('📝 documents.create ←', { id: data.id || data.documentId, url });
+
         return {
           ok: true,
-          id: data?.doc?.id || null,
-          uuid: data?.uuid || null,
-          pdfUrl: data?.pdfUrl || data?.url || null,
-          xmlUrl: data?.xmlUrl || null,
+          templateId: tid,
+          id: data.id || data.documentId || null,
+          url,
           raw: data,
         };
       } catch (err) {
-        const st = err?.response?.status || 500;
-        const detail = err?.response?.data || err?.message || String(err);
-        return { ok: false, reason: 'api_error', status: st, detail };
+        const status = err?.response?.status || 0;
+        const detail = err?.response?.data || err?.message || 'Error desconocido';
+        return {
+          ok: false,
+          reason: 'api_error',
+          status,
+          detail,
+        };
       }
     };
   });
 }
 
-/* ===== Helpers ===== */
+/* =========================
+   Helpers
+========================= */
 
-function computeMissing(requiredKeys = [], provided = {}) {
-  const miss = [];
-  for (const key of requiredKeys) {
-    // items[].campo → requiere al menos un renglón con ese campo con valor
-    if (/^items\[\]\./.test(key)) {
-      const prop = key.replace(/^items\[\]\./, '');
-      const arr = provided?.items;
-      if (!Array.isArray(arr) || arr.length === 0) { miss.push(key); continue; }
-      const anyFilled = arr.some(row => {
-        const v = row?.[prop];
-        return !(v === undefined || v === null || String(v).trim?.() === '');
-      });
-      if (!anyFilled) miss.push(key);
+/**
+ * Calcula faltantes. Acepta claves "planas" y con prefijo "items[]."
+ * Regla para items: al menos un renglón tiene que traer el campo no vacío.
+ */
+function computeMissing(requiredKeys, provided) {
+  const missing = [];
+  const keys = Array.isArray(requiredKeys) ? requiredKeys : [];
+  for (const key of keys) {
+    if (!key) continue;
+
+    // items[].campo  -> requiere que exista items[] y que al menos 1 fila tenga ese campo con valor
+    if (key.startsWith('items[].')) {
+      const k = key.replace('items[].', '');
+      const arr = Array.isArray(provided?.items) ? provided.items : [];
+      const hasOne = arr.some(row => row && row[k] !== undefined && row[k] !== null && `${row[k]}` !== '');
+      if (!hasOne) missing.push(key);
       continue;
     }
 
-    // items[] → al menos una fila con algún valor
-    if (key === 'items[]') {
-      const arr = provided?.items;
-      if (!Array.isArray(arr) || arr.length === 0) { miss.push(key); continue; }
-      const first = arr[0] || {};
-      const empty = Object.values(first).every(v => v === undefined || v === null || String(v).trim?.() === '');
-      if (empty) miss.push(key);
-      continue;
-    }
-
-    // campos planos
+    // campo plano
     const v = provided?.[key];
     if (v === undefined || v === null || `${v}`.trim?.() === '' || `${v}` === '') {
-      miss.push(key);
+      missing.push(key);
     }
   }
-  return miss;
+  return missing;
 }
 
+/**
+ * Normaliza todos los valores según contract.fields[].type
+ * Tipos soportados: text|string, number, date (YYYY-MM-DD). Cualquier otro se deja igual.
+ * También aplica a cada fila de items[] cuando el contract define keys con "items[]."
+ */
 function normalizeByContract(contract, provided) {
   const out = { ...(provided || {}) };
 
-  // Planos
+  // 1) Normalizar campos planos
   const plainSpecs = getFieldSpecs(contract, false);
   for (const spec of plainSpecs) {
     if (!spec?.key) continue;
@@ -190,61 +181,77 @@ function normalizeByContract(contract, provided) {
     }
   }
 
-  // Items
+  // 2) Normalizar items[] si existen y hay especificaciones "items[]."
   const itemSpecs = getFieldSpecs(contract, true);
-  if (itemSpecs.length && Array.isArray(out.items)) {
-    out.items = out.items.map((row) => {
+  if (Array.isArray(out.items) && itemSpecs.length) {
+    out.items = out.items.map(row => {
       const r = { ...(row || {}) };
       for (const spec of itemSpecs) {
-        const rel = spec.key.replace(/^items\[\]\./, '');
-        if (Object.prototype.hasOwnProperty.call(r, rel)) {
-          r[rel] = coerceValue(spec.type, r[rel]);
+        const k = spec.key.replace('items[].', '');
+        if (Object.prototype.hasOwnProperty.call(r, k)) {
+          r[k] = coerceValue(spec.type, r[k]);
         }
       }
       return r;
     });
   }
+
   return out;
 }
 
-function getFieldSpecs(contract, onlyItems = false) {
+/**
+ * Extrae especificaciones de fields del contract.
+ * - whenItems=true: solo devuelve fields con clave que empieza en "items[]."
+ * - whenItems=false: solo devuelve fields "planos" (sin prefijo items[].)
+ */
+function getFieldSpecs(contract, whenItems) {
   const fields = Array.isArray(contract?.fields) ? contract.fields : [];
-  return fields
-    .filter(f => {
-      const k = String(f?.key || '');
-      const isItem = k.startsWith('items[].');
-      return onlyItems ? isItem : !isItem;
-    })
-    .map(f => ({ key: f.key, type: (f.type || 'text').toLowerCase() }));
+  return fields.filter(f => {
+    const key = f?.key || '';
+    const isItem = key.startsWith('items[].');
+    return whenItems ? isItem : !isItem;
+  }).map(f => ({
+    key: f.key,
+    type: (f.type || 'text').toLowerCase(),
+    required: !!f.required,
+  }));
 }
 
+/**
+ * Forzado de tipos básico y tolerante.
+ */
 function coerceValue(type, val) {
-  const t = String(type || 'text').toLowerCase();
-  if (t === 'number' || t === 'int' || t === 'float') {
-    if (typeof val === 'number') return val;
-    if (val == null) return 0;
-    const s = String(val).replace(/,/g, '').trim();
-    const n = Number(s);
-    return Number.isFinite(n) ? n : 0;
+  const t = (type || 'text').toLowerCase();
+
+  if (t === 'number' || t === 'numeric' || t === 'float' || t === 'int' || t === 'integer') {
+    // si ya es número, respétalo
+    if (typeof val === 'number' && Number.isFinite(val)) return val;
+    // intenta convertir
+    const n = Number(String(val).replace(/,/g, '').trim());
+    return Number.isFinite(n) ? n : (val ?? null);
   }
-  if (t === 'date') {
-    if (!val) return null;
-    if (val instanceof Date && !isNaN(val.valueOf())) {
-      const y = val.getFullYear();
-      const m = String(val.getMonth() + 1).padStart(2, '0');
-      const d = String(val.getDate()).padStart(2, '0');
-      return `${y}-${m}-${d}`;
+
+  if (t === 'date' || t === 'fecha') {
+    // Acepta Date, string ISO o dd/mm/yyyy y lo deja en YYYY-MM-DD
+    if (val instanceof Date && !isNaN(val)) {
+      return val.toISOString().slice(0, 10);
     }
-    const m = String(val).trim().match(/^([0-3]?\d)[/\-]([01]?\d)[/\-](\d{4})$/);
+    const s = String(val || '').trim();
+    // dd/mm/yyyy
+    const m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
     if (m) {
       const [_, d, mo, y] = m;
-      return `${y}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const mm = mo.padStart(2, '0');
+      const dd = d.padStart(2, '0');
+      return `${y}-${mm}-${dd}`;
     }
-    const iso = String(val).match(/^\d{4}-\d{2}-\d{2}/);
-    if (iso) return String(val).slice(0, 10);
-    return String(val);
+    // ya viene ISO?
+    const iso = s.match(/^\d{4}-\d{2}-\d{2}/);
+    if (iso) return s.slice(0, 10);
+    return s || null;
   }
-  // default text/string
+
+  // text / string / default
   if (val === undefined || val === null) return '';
   return String(val);
 }
