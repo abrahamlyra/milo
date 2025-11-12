@@ -57,6 +57,14 @@ export function registerFacturapiTools(contextFactory) {
         }
       }
 
+      // 🔧 Asegurar ceros a la izquierda en payment_form (sin tocar nada más)
+      if (datos_factura.payment_form != null) {
+        const pf = String(datos_factura.payment_form).trim();
+        if (/^\d{1,2}$/.test(pf)) {
+          datos_factura.payment_form = pf.padStart(2, '0');
+        }
+      }
+
       // ====== Lectura NO intrusiva de preferencia de entrega capturada en fill.delivery ======
       //   s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
       const delivery = s.delivery?.[tid] || { mode: 'none' };
