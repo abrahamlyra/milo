@@ -3,21 +3,27 @@ import { registerTool } from '../../core/nlu/intentRouter.js';
 import { normalizeRFC, normalizeRazonSocial } from '../../core/utils/normalize.js';
 import { resolveEnum } from '../catalogs/resolve.js';
 
-// 🛡️ Lista de claves protegidas que JAMÁS deben ser convertidas a Number
-const STRING_ONLY_KEYS = new Set([
-  'zip', 'cp', 'codigo_postal', 
-  'product_key', 'clave_producto', 
-  'unit_key', 'clave_unidad',
-  'payment_form', 'forma_pago',
-  'tax_system', 'regimen_fiscal'
-]);
+// 🛡️ MAPA DE REGLAS DE RELLENO (PADDING)
+// Si llega un número o un string corto, lo forzamos a su longitud correcta con ceros a la izquierda.
+const PADDING_RULES = {
+  // ClaveProdServ del SAT siempre son 8 dígitos
+  'product_key': 8,     'clave_producto': 8,
+  // CP siempre son 5 dígitos
+  'zip': 5,             'cp': 5,            'codigo_postal': 5,
+  // Forma de pago siempre 2 dígitos
+  'payment_form': 2,    'forma_pago': 2,
+  // Regímenes fiscales suelen ser 3 dígitos
+  'tax_system': 3,      'regimen_fiscal': 3,
+  // Unidades (E48, H87) no llevan padding numérico, pero las protegemos del cast
+  'unit_key': 0,        'clave_unidad': 0
+};
 
 function getCtxState(ctx) {
   const s = ctx.session || {};
   const tid = s.selectedTemplateId;
   if (!tid) throw new Error('No hay plantilla seleccionada. Usa: usar <templateId>');
 
-  // Tolera ambos layouts (por plantilla o plano)
+  // Tolera ambos layouts
   const contract = s.contracts?.[tid] ?? s.contract ?? null;
   if (!contract) throw new Error('Contract no cargado para esta plantilla.');
 
@@ -36,7 +42,6 @@ function computeMissing(contract, provided) {
   for (const f of fields) {
     if (!f.required) continue;
 
-    // items[].campo → requiere al menos un item con ese campo
     if (f.key?.startsWith?.('items[].')) {
       const k = f.key.replace('items[].', '');
       const items = Array.isArray(provided.items) ? provided.items : [];
@@ -46,30 +51,32 @@ function computeMissing(contract, provided) {
       continue;
     }
 
-    // campo plano (si hay default en provided ya no se marca)
     const v = provided[f.key];
     if (v === undefined || v === null || v === '') {
       missing.push(f.key);
     }
   }
-
   return missing;
 }
 
 function applyNormalizers(key, value) {
   if (key === 'receptor_rfc') return normalizeRFC(value);
-  if (key === 'receptor_razon') return normalizeRazonSocial(value);
+  // OJO: Si normalizeRazonSocial es muy agresivo, podría estar quitando apellidos.
+  // Por seguridad, si el valor ya viene con espacios, confiamos en él.
+  if (key === 'receptor_razon') {
+    if (value && value.includes(' ')) return value.toUpperCase(); 
+    return normalizeRazonSocial(value);
+  }
   return value;
 }
 
-// ===== Helpers de entrega (notificaciones) =====
+// ===== Helpers de entrega =====
 const DELIVERY_MODES = new Set(['none', 'email', 'sms', 'both']);
 
 function coerceMode(val) {
   if (!val) return 'none';
   const t = String(val).trim().toLowerCase();
   if (DELIVERY_MODES.has(t)) return t;
-  // alias rápidos
   if (t === 'correo') return 'email';
   if (t === 'ambos') return 'both';
   return 'none';
@@ -87,35 +94,67 @@ function setDeep(target, dottedKey, value) {
   ref[parts[parts.length - 1]] = value;
 }
 
+/**
+ * Aplica reglas de padding para recuperar ceros perdidos.
+ * Ej: entrada 1010101 (number) -> salida "01010101" (string)
+ */
+function enforcePadding(key, val) {
+  // Limpia la llave de items[]. para buscar en las reglas
+  const cleanKey = key.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
+  
+  // Si no hay regla para esta llave, devuelve el valor tal cual (casteado si es necesario)
+  if (!Object.prototype.hasOwnProperty.call(PADDING_RULES, cleanKey)) {
+    return val;
+  }
+
+  const targetLen = PADDING_RULES[cleanKey];
+  let strVal = String(val ?? '');
+
+  // Caso especial: Si es unit_key (E48) no rellenamos con ceros, solo aseguramos string
+  if (targetLen === 0) return strVal;
+
+  // Relleno mágico
+  return strVal.trim().padStart(targetLen, '0');
+}
+
 function parseRawKV(raw) {
-  // Acepta letras, números, guion bajo, punto y corchetes en la KEY
-  // Ej: mode=email email.to="cliente@dominio.com" sms.toE164=+525512345678
   const out = {};
-  const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+  // MEJORA DE REGEX: Intenta capturar valores sin comillas hasta encontrar el siguiente "key="
+  // Grupo 1: key
+  // Grupo 2: valor comillas dobles
+  // Grupo 3: valor comillas simples
+  // Grupo 4: valor sin comillas (consume hasta ver un espacio seguido de algo= o el final)
+  const re = /([\w.\[\]]+)=(?:"([^"]*)"|'([^']*)'|((?:(?!\s+[\w.\[\]]+=).)*))/g;
+  
   let r;
   while ((r = re.exec(raw)) !== null) {
     const key = r[1];
-    const rawVal = r[3] ?? r[4] ?? r[2];
+    // Prioridad: comillas dobles > simples > sin comillas
+    const rawVal = r[2] ?? r[3] ?? r[4]; 
 
-    // 🛡️ Chequeo de protección: si la clave es protegida, NO convertir a número
-    // Limpiamos la clave de prefijos items[], items[0]. para verificar solo el nombre del campo
-    const cleanKey = key.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
-    const isProtected = STRING_ONLY_KEYS.has(cleanKey);
+    if (rawVal === undefined) continue;
 
-    const cast =
-      (!isProtected && /^[0-9]+(\.[0-9]+)?$/.test(rawVal)) ? Number(rawVal)
-      : /^(true|false)$/i.test(rawVal) ? /^true$/i.test(rawVal)
-      : rawVal;
-    
-    out[key] = cast;
+    // Limpiamos espacios extra si venía sin comillas
+    const valTrimmed = rawVal.trim();
+
+    // 1. Aplicar Padding si es clave SAT
+    const padded = enforcePadding(key, valTrimmed);
+
+    // 2. Si fue modificado por padding, úsalo. Si no, intenta cast numérico/booleano
+    if (padded !== valTrimmed) {
+      out[key] = padded;
+    } else {
+      const cast =
+        /^[0-9]+(\.[0-9]+)?$/.test(padded) ? Number(padded)
+        : /^(true|false)$/i.test(padded) ? /^true$/i.test(padded)
+        : padded;
+      out[key] = cast;
+    }
   }
   return out;
 }
 
 export function registerFillTools(contextFactory) {
-  /* =========================
-    faltantes
-  ========================= */
   registerTool('fill.missing', async () => {
     const ctx = contextFactory();
     return async () => {
@@ -127,9 +166,6 @@ export function registerFillTools(contextFactory) {
     };
   });
 
-  /* =========================
-    sugerir (alineado con formatter)
-  ========================= */
   registerTool('fill.suggest', async (injectedFactory) => {
     const cf = injectedFactory || contextFactory;
     return async ({ mode = 'min' } = {}) => {
@@ -137,25 +173,24 @@ export function registerFillTools(contextFactory) {
       const { tid, s, contract, provided } = getCtxState(ctx);
       const fields = Array.isArray(contract?.fields) ? contract.fields : [];
       const catalogs = contract?.catalogs || {};
-      const payload = {}; // <- OJO: el formatter espera "payload", no "suggestion"
+      const payload = {};
 
-      // Helper ultra-defensivo para proponer algo según la pista disponible
       const propose = (f) => {
         const key = f?.key || f?.name || f?.id;
         if (!key) return;
-
-        // Si ya hay valor del usuario, no lo pisamos
         const current = provided[key];
         if (current !== undefined && current !== null && current !== '') return;
 
-        // items[].campo
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
           payload.items = payload.items || [{}];
           
-          // Si es un campo protegido (sat key), siempre string
-          if (STRING_ONLY_KEYS.has(k)) {
-            payload.items[0][k] = '01010101'; // Ejemplo genérico con cero
+          // Sugerencia inteligente para claves SAT
+          if (Object.prototype.hasOwnProperty.call(PADDING_RULES, k)) {
+            // Ejemplo genérico con ceros correctos
+            if (k.includes('product')) payload.items[0][k] = '01010101';
+            else if (k.includes('unit')) payload.items[0][k] = 'E48';
+            else payload.items[0][k] = '00';
             return;
           }
 
@@ -167,79 +202,50 @@ export function registerFillTools(contextFactory) {
           return;
         }
 
-        // enums con catálogo conocido (preferir el code si viene)
+        // ... resto de lógica suggest ...
         if ((f?.type === 'enum' || f?.optionsRef) && f?.optionsRef) {
           const enumHit = resolveEnum(catalogs, f.optionsRef, null);
           if (enumHit != null) {
-            const val = typeof enumHit === 'object' && enumHit !== null
-              ? (enumHit.code ?? enumHit.label ?? enumHit.value ?? enumHit)
-              : enumHit;
-            payload[key] = val;
+            payload[key] = typeof enumHit === 'object' ? (enumHit.code ?? enumHit.value) : enumHit;
             return;
           }
         }
-
-        // default declarado en el contrato
         if (f?.default !== undefined) { payload[key] = f.default; return; }
-
-        // heurística por tipo o por nombre de campo
+        
         const t = String(f?.type || '').toLowerCase();
         if (t === 'email') { payload[key] = 'cliente@dominio.com'; return; }
         if (t === 'rfc')   { payload[key] = 'XAXX010101000'; return; }
         if (t === 'date')  { payload[key] = new Date().toISOString().slice(0,10); return; }
         if (t === 'number'){ payload[key] = 1; return; }
-        if (t === 'money') { payload[key] = 100; return; }
-
-        // inferencia por nombre si no hay type
+        
         const k = key.toLowerCase();
         if (/razon|nombre/.test(k)) { payload[key] = 'ACME S.A. DE C.V.'; return; }
-        if (/rfc/.test(k))          { payload[key] = 'XAXX010101000'; return; }
-        if (/fecha/.test(k))        { payload[key] = new Date().toISOString().slice(0,10); return; }
-        if (/correo|email/.test(k)) { payload[key] = 'cliente@dominio.com'; return; }
-        if (/precio|monto|importe/.test(k)) { payload[key] = 100; return; }
-        if (/workers|throughput|cantidad|volumen|horas|plazo|dias/.test(k)) { payload[key] = 1; return; }
-
-        // fallback genérico
         payload[key] = 'Valor';
       };
 
-      // “min”: solo requeridos; “full”: todos los campos
-      const take = (mode === 'full')
-        ? fields
-        : fields.filter(f => f?.required);
-
+      const take = (mode === 'full') ? fields : fields.filter(f => f?.required);
       for (const f of take) propose(f);
-
-      // Si por cualquier cosa quedó vacío, fuerza un mínimo para requeridos
       if (Object.keys(payload).length === 0) {
         for (const f of fields.filter(x => x?.required)) propose(f);
       }
 
       s.lastSuggestion = s.lastSuggestion || {};
       s.lastSuggestion[tid] = { mode, suggestion: payload };
-
-      // <- ALINEADO con formatFillSuggest (usa "payload")
       return { templateId: tid, mode, payload };
     };
   });
 
-  /* =========================
-    aplicar (alineado con formatter)
-  ========================= */
   registerTool('fill.apply', async () => {
     const ctx = contextFactory();
     return async () => {
       const { tid, s, contract, provided } = getCtxState(ctx);
       const incoming = s.lastSuggestion?.[tid]?.suggestion || {};
-
       const target = { ...provided };
 
-      // merge plano + items
       for (const [k, v] of Object.entries(incoming)) {
         if (k === 'items' && Array.isArray(v)) {
           const cur = Array.isArray(target.items) ? target.items : [];
           target.items = cur.length ? cur : [];
-          // mezcla el primer renglón sugerido si no existía nada
           if (target.items.length === 0 && v.length > 0) {
             target.items.push({ ...v[0] });
           }
@@ -248,9 +254,8 @@ export function registerFillTools(contextFactory) {
         }
       }
 
-      // normalizar claves “críticas”
       for (const [k, v] of Object.entries(target)) {
-        if (k === 'items') continue; // se normaliza al setear cada campo
+        if (k === 'items') continue;
         target[k] = applyNormalizers(k, v);
       }
       if (Array.isArray(target.items)) {
@@ -263,85 +268,54 @@ export function registerFillTools(contextFactory) {
 
       s.provided = s.provided || {};
       s.provided[tid] = target;
-
       const missing = computeMissing(contract, target);
-
-      // <- ALINEADO con formatFillApply (usa "applied" y "merged")
       return { templateId: tid, applied: true, merged: target, missing };
     };
   });
 
   /* =========================
-    set (multi-KV, soporta items[].campo)
+    SET (Corregido para Names con espacios y Ceros perdidos)
   ========================= */
   registerTool('fill.set', async () => {
     const ctx = contextFactory();
     return async (input = {}) => {
       const { tid, s, contract, provided } = getCtxState(ctx);
-
-      // 1) Parseo defensivo de input (incluye el caso __raw con key=val)
       const kv = {};
+
       for (const [k, v] of Object.entries(input || {})) {
         if (k !== '__raw') {
-          // 🛡️ PROTECCIÓN EXTRA: Si viene directo en el JSON, también revisar si es protegido
-          // Aunque generalmente el NLU ya lo casteó, por seguridad verificamos
-          const cleanKey = k.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
-          if (STRING_ONLY_KEYS.has(cleanKey) && typeof v === 'number') {
-             // Intento de recuperación (aunque si ya llegó number es difícil recuperar ceros perdidos,
-             // esto evita re-casteos erróneos futuros)
-             kv[k] = String(v); 
-          } else {
-             kv[k] = v;
-          }
+          // APLICAR RELLENO INCLUSO SI VIENE DIRECTO DEL NLU (JSON)
+          // Esto recupera el "01010101" si el NLU mandó el número 1010101
+          kv[k] = enforcePadding(k, v);
           continue;
         }
         
-        // Lógica de __raw (string de input directo)
         if (typeof v === 'string') {
-          // Acepta letras, números, guion bajo, punto y corchetes en la KEY
-          const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
-          let r;
-          while ((r = re.exec(v)) !== null) {
-            const key = r[1];
-            const raw = r[3] ?? r[4] ?? r[2];
-
-            // 🛡️ AQUÍ SE APLICA LA MAGIA:
-            // Verificar si la clave es una de las protegidas (product_key, zip, etc.)
-            const cleanKey = key.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
-            const isProtected = STRING_ONLY_KEYS.has(cleanKey);
-
-            // SOLO convertir a Number si NO es protegida
-            const cast =
-              (!isProtected && /^[0-9]+(\.[0-9]+)?$/.test(raw)) ? Number(raw)
-              : /^(true|false)$/i.test(raw) ? /^true$/i.test(raw) // boolean
-              : raw; // string
-            
-            kv[key] = cast;
-          }
+          // Usamos la nueva regex más inteligente dentro de parseRawKV
+          const parsed = parseRawKV(v);
+          Object.assign(kv, parsed);
         }
       }
 
-      // 2) Aplica a provided (items y planos) — ahora con soporte a índices de items
       const target = { ...provided };
 
       for (const [key, val] of Object.entries(kv)) {
-        // Normaliza RFC/Razón, etc.
+        // Normaliza (Nombre, RFC)
         const cleanKey = key.replace(/^items\[(\d+)\]\./, '').replace(/^items\[\]\./, '');
         const normalized = applyNormalizers(cleanKey, val);
 
-        // Caso A: items[<idx>].campo=valor
+        // Caso A: items[<idx>].campo
         const mIndexed = key.match(/^items\[(\d+)\]\.(.+)$/);
         if (mIndexed) {
           const idx = Number(mIndexed[1]);
           const k   = mIndexed[2];
           target.items = Array.isArray(target.items) ? target.items : [];
-          // asegura longitud
           while (target.items.length <= idx) target.items.push({});
           target.items[idx] = { ...(target.items[idx] || {}), [k]: normalized };
           continue;
         }
 
-        // Caso B: items[].campo=valor  → por compat, escribe en items[0]
+        // Caso B: items[].campo
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
           target.items = Array.isArray(target.items) ? target.items : [];
@@ -350,79 +324,45 @@ export function registerFillTools(contextFactory) {
           continue;
         }
 
-        // Caso C: campos planos
+        // Caso C: planos
         target[key] = normalized;
       }
 
       s.provided = s.provided || {};
       s.provided[tid] = target;
-
       const missing = computeMissing(contract, target);
       return { templateId: tid, provided: target, missing };
     };
   });
 
-  /* =========================
-    ENTREGA (notificaciones) — NUEVO
-    - Guarda preferencia y datos de envío en s.delivery[tid]
-    - No toca contract ni provided para no afectar "missing"
-  ========================= */
   registerTool('fill.delivery', async () => {
     const ctx = contextFactory();
     return async (input = {}) => {
       const { tid, s } = getCtxState(ctx);
-
-      // Estado actual (por plantilla)
       s.delivery = s.delivery || {};
       const current = s.delivery[tid] || { mode: 'none' };
-
-      // Soporta __raw: "mode=email email.to=cliente@dominio.com sms.toE164=+525512345678"
       const { __raw, ...rest } = input || {};
       const flat = { ...rest };
       if (typeof __raw === 'string' && __raw.trim().length) {
         Object.assign(flat, parseRawKV(__raw));
       }
-
-      // Construye el siguiente estado sin romper lo existente
       const next = {
         mode: current.mode || 'none',
         email: { ...(current.email || {}) },
         sms: { ...(current.sms || {}) },
       };
-
-      // Permite mode a nivel raíz
-      if (flat.mode !== undefined) {
-        next.mode = coerceMode(flat.mode);
-      }
-
-      // Permite objetos anidados: { email: {...}, sms: {...} }
-      if (flat.email && typeof flat.email === 'object') {
-        next.email = { ...next.email, ...flat.email };
-      }
-      if (flat.sms && typeof flat.sms === 'object') {
-        next.sms = { ...next.sms, ...flat.sms };
-      }
-
-      // Permite setDeep con claves punteadas en __raw: "email.to=... sms.message=..."
+      if (flat.mode !== undefined) next.mode = coerceMode(flat.mode);
+      if (flat.email && typeof flat.email === 'object') next.email = { ...next.email, ...flat.email };
+      if (flat.sms && typeof flat.sms === 'object') next.sms = { ...next.sms, ...flat.sms };
       for (const [k, v] of Object.entries(flat)) {
         if (k === 'mode' || k === 'email' || k === 'sms') continue;
-        if (typeof k === 'string' && k.includes('.')) {
-          setDeep(next, k, v);
-        }
+        if (typeof k === 'string' && k.includes('.')) setDeep(next, k, v);
       }
-
-      // Persistir
       s.delivery[tid] = next;
-
-      // Respuesta
-      return {
-        templateId: tid,
-        delivery: next
-      };
+      return { templateId: tid, delivery: next };
     };
   });
 
-  // Consultar entrega actual
   registerTool('fill.delivery.get', async () => {
     const ctx = contextFactory();
     return async () => {
@@ -432,7 +372,6 @@ export function registerFillTools(contextFactory) {
     };
   });
 
-  // Reset de entrega (por plantilla)
   registerTool('fill.delivery.reset', async () => {
     const ctx = contextFactory();
     return async () => {

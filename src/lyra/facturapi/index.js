@@ -13,19 +13,18 @@ export function registerFacturapiTools(contextFactory) {
       const contract = s.contracts?.[tid] ?? s.contract ?? null;
       if (!contract) throw new Error('Contract no cargado para esta plantilla.');
 
-      // Validación de tipo de plantilla
       const type = String(contract.type || '').toLowerCase();
       if (!(type.includes('invoice') || type.includes('factura'))) {
         return {
           ok: false,
           reason: 'wrong_type',
-          message: `La plantilla seleccionada no es de tipo factura (${contract.type || 'sin tipo'}). Usa "generar" para documentos normales.`,
+          message: `La plantilla seleccionada no es de tipo factura. Usa "generar" para documentos normales.`,
         };
       }
 
       const provided = (s.provided && s.provided[tid]) ? s.provided[tid] : {};
 
-      // 1. Validación de campos Requeridos
+      // 1. Requeridos
       const requiredKeys = Array.isArray(contract.required) && contract.required.length
         ? contract.required
         : (Array.isArray(contract.fields)
@@ -37,36 +36,33 @@ export function registerFacturapiTools(contextFactory) {
         return { ok: false, reason: 'missing', missing, message: `Faltan campos requeridos: ${missing.join(', ')}` };
       }
 
-      // 2. Normalización (Aquí se arregla el problema del "0" en product_key)
+      // 2. Normalización y RECONSTRUCCIÓN DE CEROS
       const normalized = normalizeByContract(contract, provided);
 
-      // 3. Construcción del Payload para Facturapi
+      // 3. Payload
       const datos_factura = buildFacturaPayloadData({
         contract,
         fields: normalized,
         fields_filled: normalized,
       });
 
-      // 🔒 Parche de seguridad: payment_form con padding (ej: '1' -> '01')
+      // Parche extra para payment_form global (por si acaso)
       if (!datos_factura.payment_form || String(datos_factura.payment_form).trim() === '') {
         const fallback =
           s.provided?.[tid]?.payment_form ??
           contract?.defaults?.payment_form ??
           s.provided?.[tid]?.forma_pago;
-    
         if (fallback) {
           datos_factura.payment_form = String(fallback).padStart(2, '0');
         }
       }
 
-      // 4. Lógica de Notificaciones (Integrada desde Documents)
-      // s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
+      // 4. Notificaciones
       const delivery = s.delivery?.[tid] || { mode: 'none' };
       const deliveryMode = String(delivery.mode || 'none').toLowerCase();
       const wantsEmail = deliveryMode === 'email' || deliveryMode === 'both';
       const wantsSms   = deliveryMode === 'sms'   || deliveryMode === 'both';
 
-      // Extraer destinatarios con fallback tolerante
       const emailTo =
         delivery?.email?.to ??
         (typeof delivery?.email === 'string' ? delivery.email : undefined) ??
@@ -80,35 +76,31 @@ export function registerFacturapiTools(contextFactory) {
         _input?.phone ??
         undefined;
 
-      // 5. Preparar el Body final
       const modeInput = _input.mode ?? _input.modo ?? s.meta?.mode ?? s.meta?.modo ?? 'test';
 
       const body = {
         template_id: tid,
         datos_factura,
         modo: modeInput,
-        skipSend: _input.skipSend ?? false, // Si es false, Facturapi intentará enviar si hay email
+        skipSend: _input.skipSend ?? false,
       };
 
-      // Inyectar email/phone SOLO si el usuario lo pidió y existen los datos
       if (wantsEmail && emailTo) body.email = emailTo;
       if (wantsSms && phoneTo)   body.phone = phoneTo;
 
-      // Log de verificación antes del envío
-      console.log('🧾 FACTURA → payload:', {
+      // Log FINAL
+      console.log('🧾 FACTURA → payload final:', {
         tid,
+        product_key_sample: datos_factura.items?.[0]?.product_key, // <-- CHECAR ESTO EN LOG
         payment_form: datos_factura.payment_form,
-        items_sample: datos_factura.items?.[0], // Verificar aquí si sale el product_key correcto
-        notifications: { wantsEmail, wantsSms, emailTo, phoneTo }
+        notif: { wantsEmail, emailTo }
       });
 
       try {
-        console.log('🧾 invoices.create → POST /facturapi/factura-completa');
         const res = await ctx.http.post('/facturapi/factura-completa', body, {
           headers: { 'Content-Type': 'application/json' },
         });
         const data = res?.data || {};
-        
         return {
           ok: true,
           id: data?.doc?.id || null,
@@ -159,15 +151,31 @@ function computeMissing(requiredKeys = [], provided = {}) {
   return miss;
 }
 
+// REGLAS DE RELLENO (Igual que en fill.js para doble seguridad)
+const PADDING_RULES = {
+  'product_key': 8,     'clave_producto': 8,
+  'zip': 5,             'cp': 5,            'codigo_postal': 5,
+  'payment_form': 2,    'forma_pago': 2,
+  'tax_system': 3,      'regimen_fiscal': 3,
+  'unit_key': 0,        'clave_unidad': 0
+};
+
 /**
- * 🚨 AQUÍ ESTÁ LA MAGIA DEL CERO 🚨
- * Normaliza tipos, pero PROTEGE claves del SAT para que sean siempre STRING.
+ * Normaliza y REPARA ceros perdidos.
  */
 function normalizeByContract(contract, provided) {
   const out = { ...(provided || {}) };
 
-  // Lista de claves que JAMÁS deben ser number, siempre string para conservar ceros (01, 06250, etc)
-  const SAT_STRING_KEYS = ['product_key', 'unit_key', 'zip', 'cp', 'codigo_postal', 'payment_form', 'tax_system'];
+  // Helper interno para aplicar padding si la regla existe
+  const applyPad = (k, val) => {
+    const rule = PADDING_RULES[k];
+    if (rule !== undefined) {
+      let s = String(val ?? '');
+      if (rule > 0) s = s.trim().padStart(rule, '0');
+      return s;
+    }
+    return val; // si no hay regla, devuelve tal cual (se coerceará abajo)
+  };
 
   // Planos
   const plainSpecs = getFieldSpecs(contract, false);
@@ -175,11 +183,13 @@ function normalizeByContract(contract, provided) {
     if (!spec?.key) continue;
     const k = spec.key;
     
-    // Si la clave es protegida, forzamos 'text', si no, usamos el tipo del contrato
-    const safeType = SAT_STRING_KEYS.includes(k) ? 'text' : spec.type;
-
-    if (Object.prototype.hasOwnProperty.call(out, k)) {
-      out[k] = coerceValue(safeType, out[k]);
+    // 1. Primero intentamos reparar ceros si es clave SAT
+    let val = out[k];
+    if (PADDING_RULES[k] !== undefined) {
+      out[k] = applyPad(k, val);
+    } else if (Object.prototype.hasOwnProperty.call(out, k)) {
+      // 2. Si no es SAT, cast normal
+      out[k] = coerceValue(spec.type, out[k]);
     }
   }
 
@@ -191,11 +201,13 @@ function normalizeByContract(contract, provided) {
       for (const spec of itemSpecs) {
         const rel = spec.key.replace(/^items\[\]\./, '');
         
-        // Misma protección para items (ej: product_key dentro de items)
-        const safeType = SAT_STRING_KEYS.includes(rel) ? 'text' : spec.type;
-
-        if (Object.prototype.hasOwnProperty.call(r, rel)) {
-          r[rel] = coerceValue(safeType, r[rel]);
+        // 1. Reparar ceros en items (ej. product_key)
+        let val = r[rel];
+        if (PADDING_RULES[rel] !== undefined) {
+          r[rel] = applyPad(rel, val);
+        } else if (Object.prototype.hasOwnProperty.call(r, rel)) {
+          // 2. Cast normal
+          r[rel] = coerceValue(spec.type, r[rel]);
         }
       }
       return r;
@@ -231,7 +243,6 @@ function coerceValue(type, val) {
     if (val instanceof Date && !isNaN(val.valueOf())) {
       return val.toISOString().slice(0, 10);
     }
-    // dd/mm/yyyy -> yyyy-mm-dd
     const m = String(val).trim().match(/^([0-3]?\d)[/\-]([01]?\d)[/\-](\d{4})$/);
     if (m) {
       const [_, d, mo, y] = m;
@@ -242,7 +253,6 @@ function coerceValue(type, val) {
     return String(val);
   }
   
-  // default text/string: NO TRIM para no romper formatos, solo String()
   if (val === undefined || val === null) return '';
   return String(val);
 }
