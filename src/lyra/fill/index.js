@@ -3,6 +3,15 @@ import { registerTool } from '../../core/nlu/intentRouter.js';
 import { normalizeRFC, normalizeRazonSocial } from '../../core/utils/normalize.js';
 import { resolveEnum } from '../catalogs/resolve.js';
 
+// 🛡️ Lista de claves protegidas que JAMÁS deben ser convertidas a Number
+const STRING_ONLY_KEYS = new Set([
+  'zip', 'cp', 'codigo_postal', 
+  'product_key', 'clave_producto', 
+  'unit_key', 'clave_unidad',
+  'payment_form', 'forma_pago',
+  'tax_system', 'regimen_fiscal'
+]);
+
 function getCtxState(ctx) {
   const s = ctx.session || {};
   const tid = s.selectedTemplateId;
@@ -87,10 +96,17 @@ function parseRawKV(raw) {
   while ((r = re.exec(raw)) !== null) {
     const key = r[1];
     const rawVal = r[3] ?? r[4] ?? r[2];
+
+    // 🛡️ Chequeo de protección: si la clave es protegida, NO convertir a número
+    // Limpiamos la clave de prefijos items[], items[0]. para verificar solo el nombre del campo
+    const cleanKey = key.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
+    const isProtected = STRING_ONLY_KEYS.has(cleanKey);
+
     const cast =
-      /^[0-9]+(\.[0-9]+)?$/.test(rawVal) ? Number(rawVal)
+      (!isProtected && /^[0-9]+(\.[0-9]+)?$/.test(rawVal)) ? Number(rawVal)
       : /^(true|false)$/i.test(rawVal) ? /^true$/i.test(rawVal)
       : rawVal;
+    
     out[key] = cast;
   }
   return out;
@@ -98,7 +114,7 @@ function parseRawKV(raw) {
 
 export function registerFillTools(contextFactory) {
   /* =========================
-  	faltantes
+    faltantes
   ========================= */
   registerTool('fill.missing', async () => {
     const ctx = contextFactory();
@@ -112,7 +128,7 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-  	sugerir (alineado con formatter)
+    sugerir (alineado con formatter)
   ========================= */
   registerTool('fill.suggest', async (injectedFactory) => {
     const cf = injectedFactory || contextFactory;
@@ -136,6 +152,13 @@ export function registerFillTools(contextFactory) {
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
           payload.items = payload.items || [{}];
+          
+          // Si es un campo protegido (sat key), siempre string
+          if (STRING_ONLY_KEYS.has(k)) {
+            payload.items[0][k] = '01010101'; // Ejemplo genérico con cero
+            return;
+          }
+
           const kind = (f?.type || (/price|importe|monto|cantidad|qty|quantity/i.test(k) ? 'number' : 'string')).toLowerCase();
           payload.items[0][k] =
             (kind === 'number' || kind === 'money') ? 1
@@ -201,7 +224,7 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-  	aplicar (alineado con formatter)
+    aplicar (alineado con formatter)
   ========================= */
   registerTool('fill.apply', async () => {
     const ctx = contextFactory();
@@ -249,7 +272,7 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-  	set (multi-KV, soporta items[].campo)
+    set (multi-KV, soporta items[].campo)
   ========================= */
   registerTool('fill.set', async () => {
     const ctx = contextFactory();
@@ -260,9 +283,20 @@ export function registerFillTools(contextFactory) {
       const kv = {};
       for (const [k, v] of Object.entries(input || {})) {
         if (k !== '__raw') {
-          kv[k] = v;
+          // 🛡️ PROTECCIÓN EXTRA: Si viene directo en el JSON, también revisar si es protegido
+          // Aunque generalmente el NLU ya lo casteó, por seguridad verificamos
+          const cleanKey = k.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
+          if (STRING_ONLY_KEYS.has(cleanKey) && typeof v === 'number') {
+             // Intento de recuperación (aunque si ya llegó number es difícil recuperar ceros perdidos,
+             // esto evita re-casteos erróneos futuros)
+             kv[k] = String(v); 
+          } else {
+             kv[k] = v;
+          }
           continue;
         }
+        
+        // Lógica de __raw (string de input directo)
         if (typeof v === 'string') {
           // Acepta letras, números, guion bajo, punto y corchetes en la KEY
           const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
@@ -270,8 +304,18 @@ export function registerFillTools(contextFactory) {
           while ((r = re.exec(v)) !== null) {
             const key = r[1];
             const raw = r[3] ?? r[4] ?? r[2];
-            // CAMBIO: número entero o decimal → castear
-            const cast = /^[0-9]+(\.[0-9]+)?$/.test(raw) ? Number(raw) : raw;
+
+            // 🛡️ AQUÍ SE APLICA LA MAGIA:
+            // Verificar si la clave es una de las protegidas (product_key, zip, etc.)
+            const cleanKey = key.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
+            const isProtected = STRING_ONLY_KEYS.has(cleanKey);
+
+            // SOLO convertir a Number si NO es protegida
+            const cast =
+              (!isProtected && /^[0-9]+(\.[0-9]+)?$/.test(raw)) ? Number(raw)
+              : /^(true|false)$/i.test(raw) ? /^true$/i.test(raw) // boolean
+              : raw; // string
+            
             kv[key] = cast;
           }
         }
@@ -282,7 +326,8 @@ export function registerFillTools(contextFactory) {
 
       for (const [key, val] of Object.entries(kv)) {
         // Normaliza RFC/Razón, etc.
-        const normalized = applyNormalizers(key.replace(/^items\[(\d+)\]\./, '').replace(/^items\[\]\./, ''), val);
+        const cleanKey = key.replace(/^items\[(\d+)\]\./, '').replace(/^items\[\]\./, '');
+        const normalized = applyNormalizers(cleanKey, val);
 
         // Caso A: items[<idx>].campo=valor
         const mIndexed = key.match(/^items\[(\d+)\]\.(.+)$/);
@@ -318,9 +363,9 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-  	ENTREGA (notificaciones) — NUEVO
-  	- Guarda preferencia y datos de envío en s.delivery[tid]
-  	- No toca contract ni provided para no afectar "missing"
+    ENTREGA (notificaciones) — NUEVO
+    - Guarda preferencia y datos de envío en s.delivery[tid]
+    - No toca contract ni provided para no afectar "missing"
   ========================= */
   registerTool('fill.delivery', async () => {
     const ctx = contextFactory();
