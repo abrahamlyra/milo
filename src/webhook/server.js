@@ -12,62 +12,72 @@ import { registerTemplateTools } from '../lyra/templates/index.js';
 import { registerFillTools } from '../lyra/fill/index.js';
 import { registerDocumentTools } from '../lyra/documents/index.js';
 import { registerFacturapiTools } from '../lyra/facturapi/index.js';
-
-// NUEVO: registrar herramientas de user (incluye billing)
 import { registerUserTools } from '../lyra/user/index.js';
+import { registerAssetTools } from '../lyra/assets/index.js';
 
-// NUEVO: router para uploads efímeros de CSD (cer/key) en sesión
 import billingUploads from './routes/billingUploads.js';
+import assetsUploads from './routes/assetsUploads.js';
 
+// =========================
+// App base
+// =========================
 const app = express();
 
-/* =========================
-   CORS + JSON
-========================= */
+// CORS basado en config.allowedOrigins
 const corsOptions = {
-  origin: (origin, cb) => {
-    if (!origin) return cb(null, true);
-    if (config.allowedOrigins.length === 0 || config.allowedOrigins.includes(origin)) {
-      return cb(null, true);
-    }
-    cb(new Error(`Origin no permitido: ${origin}`));
+  origin: (origin, callback) => {
+    // requests sin origin (curl, same-origin) → permitir
+    if (!origin) return callback(null, true);
+
+    // si no hay lista configurada, permitir todo
+    if (!config.allowedOrigins.length) return callback(null, true);
+
+    // si está en la lista, permitir
+    if (config.allowedOrigins.includes(origin)) return callback(null, true);
+
+    // si no, bloquear
+    return callback(new Error('Not allowed by CORS'));
   },
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 };
+
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '2mb' }));
 
-/* =========================
-   Context Factory + Router
-========================= */
-let _currentReq = null;
-const getCurrentReq = () => _currentReq;
-const setCurrentReq = (r) => { _currentReq = r; };
+// =========================
+// Contexto del bot
+// =========================
+let currentReq = null;
+const getCurrentReq = () => currentReq;
+const setCurrentReq = (req) => {
+  currentReq = req;
+};
 
 const contextFactory = createContextFactory(getCurrentReq);
 
-/* =========================
-   Registro de tools (una sola vez)
-========================= */
+// Registro de tools de Lyra
 registerTemplateTools(contextFactory);
 registerFillTools(contextFactory);
 registerDocumentTools(contextFactory);
 registerFacturapiTools(contextFactory);
-registerUserTools(contextFactory); // ⬅️ NUEVO: habilita billing.*
+registerUserTools(contextFactory);
+registerAssetTools(contextFactory);
 
-/* =========================
-   Routes
-========================= */
+// =========================
+// Rutas
+// =========================
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, tools: listTools() });
+  res.json({
+    ok: true,
+    tools: listTools(),
+  });
 });
 
-// Monta uploads bajo /milo (antes del router de mensajes)
+// Subidas efímeras al bot
 app.use('/milo', billingUploads);
+app.use('/milo', assetsUploads);
 
-// Monta router de Milo bajo /milo
+// Router principal de mensajes
 app.use('/milo', makeMessagesRouter(contextFactory, setCurrentReq));
 
 /* =========================

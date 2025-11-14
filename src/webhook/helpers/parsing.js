@@ -1,3 +1,4 @@
+// src/webhook/helpers/parsing.js
 import { getTool, listTools } from '../../core/nlu/intentRouter.js';
 
 /** KV parser: key=value con comillas, soporta dots/brackets p.ej. items[0].price=123 */
@@ -13,7 +14,29 @@ export function parseKV(rest = '') {
   return out;
 }
 
-/** Alias naturales (lenguaje humano → acción + input) */
+/**
+ * Mapeo de tipos de assets que puede usar el usuario / front
+ * hacia los tipos que entiende el backend de assets.
+ *
+ * raw  → lo que escribe el usuario / front
+ * tipo → lo que mandamos al backend (/assets/upload, /assets/:tipo)
+ */
+const ASSET_TYPE_ALIASES = {
+  // tipos que ya coinciden 1:1
+  logo:        { tipo: 'logo',        rawTipo: 'logo' },
+  header:      { tipo: 'header',      rawTipo: 'header' },
+  footer:      { tipo: 'footer',      rawTipo: 'footer' },
+  background:  { tipo: 'background',  rawTipo: 'background' },
+  image:       { tipo: 'image',       rawTipo: 'image' },
+
+  // tipos que viene usando hoy el front
+  header_img:  { tipo: 'header',      rawTipo: 'header_img' },
+  footer_img:  { tipo: 'footer',      rawTipo: 'footer_img' },
+  watermark:   { tipo: 'background',  rawTipo: 'watermark' },
+  signature:   { tipo: 'image',       rawTipo: 'signature' },
+};
+
+/** KV parser: natural language → acción + input */
 const NATURAL_ALIASES = [
   { re: /^usar\s+([a-z0-9-]{8,})$/i,            action: 'templates.contract', args: m => ({ templateId: m[1] }) },
   { re: /^faltantes$/i,                          action: 'fill.missing',       args: () => ({}) },
@@ -36,6 +59,35 @@ const NATURAL_ALIASES = [
 
   { re: /^(registrar\s+rfc|confirmar\s+facturaci[oó]n|activar\s+facturaci[oó]n\s+ahora)$/i,
     action: 'billing.register', args: () => ({}) },
+
+  // === Assets (logo / header / footer / watermark / signature)
+  // "subir <tipo>"
+  {
+    re: /^subir\s+(logo|header|footer|background|image|header_img|footer_img|watermark|signature)$/i,
+    action: 'assets.upload',
+    args: m => {
+      const raw = m[1].toLowerCase();
+      const mapped = ASSET_TYPE_ALIASES[raw] || { tipo: raw, rawTipo: raw };
+      return {
+        tipo: mapped.tipo,
+        rawTipo: mapped.rawTipo,
+      };
+    },
+  },
+
+  // "ver <tipo>"
+  {
+    re: /^ver\s+(logo|header|footer|background|image|header_img|footer_img|watermark|signature)$/i,
+    action: 'assets.view',
+    args: m => {
+      const raw = m[1].toLowerCase();
+      const mapped = ASSET_TYPE_ALIASES[raw] || { tipo: raw, rawTipo: raw };
+      return {
+        tipo: mapped.tipo,
+        rawTipo: mapped.rawTipo,
+      };
+    },
+  },
 ];
 
 /** Intenta mapear texto a { action, input } */
