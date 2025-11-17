@@ -18,6 +18,9 @@ import {
   formatBillingRegister,
 } from '../helpers/formatters.js';
 
+// 🧠 NUEVO: importamos el cerebro LLM de Milo (Fase 1)
+import { runMiloBrain } from '../../ai/brain/index.js';
+
 export function makeMessageController(contextFactory) {
   // NOTE: `contextFactory` puede ser:
   //  - una función sin argumentos: () => ctx
@@ -53,8 +56,34 @@ export function makeMessageController(contextFactory) {
         }
       }
 
+      // 🧠 NUEVO BLOQUE:
+      // Si NO hay acción explícita, delegamos al cerebro LLM de Milo.
+      // Si el LLM falla por cualquier razón, hacemos fallback al mensaje de ayuda clásico.
       if (!resolvedAction) {
-        return res.json(okReply(initialHelpMessage(), { actions: listTools() }));
+        try {
+          const brainResult = await runMiloBrain({
+            sessionId: sid,
+            message: message,
+            rawPayload: req.body || {},
+            contextFactory, // Fase 1 no lo usa, pero lo dejamos para Fase 2 (tools)
+          });
+
+          if (!brainResult?.ok) {
+            // Fallback suave: comportamiento anterior (help + listado de tools)
+            return res.json(okReply(initialHelpMessage(), { actions: listTools() }));
+          }
+
+          return res.json(
+            okReply(brainResult.reply, {
+              mode: 'llm',
+              usedTools: brainResult.usedTools || [],
+            }),
+          );
+        } catch (err) {
+          // Si algo truena MUY feo en el cerebro, también hacemos fallback al help.
+          console.error('[Milo][Webhook] Error al ejecutar runMiloBrain:', err);
+          return res.json(okReply(initialHelpMessage(), { actions: listTools() }));
+        }
       }
 
       // ⬇️ Factory por request
