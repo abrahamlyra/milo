@@ -64,8 +64,8 @@ export function makeMessageController(contextFactory) {
           const brainResult = await runMiloBrain({
             sessionId: sid,
             message: message,
-            rawPayload: req.body || {},
-            contextFactory, // Fase 1 no lo usa, pero lo dejamos para Fase 2 (tools)
+            rawPayload: req,
+            contextFactory, 
           });
 
           if (!brainResult?.ok) {
