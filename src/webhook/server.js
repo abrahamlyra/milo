@@ -17,7 +17,7 @@ import { registerAssetTools } from '../lyra/assets/index.js';
 
 import billingUploads from './routes/billingUploads.js';
 import assetsUploads from './routes/assetsUploads.js';
-import { registerKnowledgeTools } from '../lyra/knowledge/index.js';
+import { registerKnowledgeTools } from '../knowledge/index.js';
 
 // =========================
 // App base
