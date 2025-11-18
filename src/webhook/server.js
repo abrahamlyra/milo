@@ -17,6 +17,7 @@ import { registerAssetTools } from '../lyra/assets/index.js';
 
 import billingUploads from './routes/billingUploads.js';
 import assetsUploads from './routes/assetsUploads.js';
+import { registerKnowledgeTools } from '../lyra/knowledge/index.js';
 
 // =========================
 // App base
@@ -62,6 +63,8 @@ registerDocumentTools(contextFactory);
 registerFacturapiTools(contextFactory);
 registerUserTools(contextFactory);
 registerAssetTools(contextFactory);
+registerKnowledgeTools(contextFactory); 
+
 
 // =========================
 // Rutas
