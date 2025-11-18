@@ -13,7 +13,7 @@
 // - catalog.clave_producto_servicio.search
 
 import { z } from 'zod';
-import { registerTool } from '../../core/nlu/intentRouter.js';
+import { registerTool } from '../core/nlu/intentRouter.js';
 
 // 🔹 Schema genérico para knowledge.search
 const KnowledgeSearchInput = z.object({
