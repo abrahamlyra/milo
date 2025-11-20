@@ -29,14 +29,31 @@ const ALLOWED_ACTIONS = [
   'catalog.clave_producto_servicio.search',
 ];
 
+// Acciones de catálogo/knowledge que requieren forzosamente un query
+const CATALOG_ACTIONS = [
+  'knowledge.search',
+  'catalog.regimen_fiscal.search',
+  'catalog.uso_cfdi.search',
+  'catalog.forma_pago.search',
+  'catalog.metodo_pago.search',
+  'catalog.clave_producto_servicio.search',
+];
+
+// Acciones críticas que requieren un templateId válido
+const REQUIRES_TEMPLATE_ID = [
+  'templates.contract',
+  'documents.create',
+  'invoices.create',
+];
+
 /**
  * Planner: decide si Milo debe solo chatear o llamar una acción interna.
  * Devuelve siempre un JSON tipo:
  * {
- *   "mode": "chat" | "tool",
- *   "reply": "texto opcional si mode=chat",
- *   "action": "<nombre del tool>" (si mode=tool),
- *   "input": { ... } // opcional
+ * "mode": "chat" | "tool",
+ * "reply": "texto opcional si mode=chat",
+ * "action": "<nombre del tool>" (si mode=tool),
+ * "input": { ... } // opcional
  * }
  */
 async function planNextStep({ openai, history, message }) {
@@ -195,8 +212,8 @@ async function buildReplyFromTool({
 
 /**
  * Fase 2: Milo puede decidir si:
- *  - Solo chatea (modo "chat"), o
- *  - Ejecuta una acción interna simple (cualquiera de las declaradas en ALLOWED_ACTIONS) y luego explica el resultado.
+ * - Solo chatea (modo "chat"), o
+ * - Ejecuta una acción interna simple (cualquiera de las declaradas en ALLOWED_ACTIONS) y luego explica el resultado.
  */
 export async function runMiloBrain({
   sessionId = 'default',
@@ -230,7 +247,41 @@ export async function runMiloBrain({
 
     // 3) Ejecutar acción interna (cualquiera de las permitidas en ALLOWED_ACTIONS)
     const action = plan.action;
-    const input = plan.input || {};
+    let input = plan.input || {};
+
+    // 👇 3.1. Si es un catálogo / knowledge, garantizamos input.query
+    if (CATALOG_ACTIONS.includes(action)) {
+      if (!input || typeof input !== 'object') {
+        input = {};
+      }
+      if (!input.query || typeof input.query !== 'string' || !input.query.trim()) {
+        input.query = String(message ?? '');
+      }
+    }
+
+    // 👇 3.2. Si la acción requiere templateId y no viene, mejor nos vamos a chat
+    if (REQUIRES_TEMPLATE_ID.includes(action)) {
+      const hasTemplateId =
+        input &&
+        typeof input.templateId === 'string' &&
+        input.templateId.trim().length > 0;
+
+      if (!hasTemplateId) {
+        const reply = await runChatOnly({ openai, history, message });
+
+        saveTurn({
+          sessionId,
+          userMessage: message,
+          assistantMessage: reply,
+        });
+
+        return {
+          ok: true,
+          reply,
+          usedTools: [],
+        };
+      }
+    }
 
     const toolResult = await callMiloAction({
       action,
