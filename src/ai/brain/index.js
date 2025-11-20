@@ -7,7 +7,27 @@ import { callMiloAction } from './toolsBridge.js';
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // 🔒 Lista de acciones que el LLM puede disparar en esta primera fase
-const ALLOWED_ACTIONS = ['templates.list'];
+const ALLOWED_ACTIONS = [
+  'templates.list',
+  'templates.contract',
+  'fill.missing',
+  'fill.suggest',
+  'fill.set',
+  'fill.apply',
+  'documents.create',
+  'invoices.create',
+  'billing.contract',
+  'billing.missing',
+  'billing.register',
+  'assets.upload',
+  'assets.view',
+  'knowledge.search',
+  'catalog.regimen_fiscal.search',
+  'catalog.uso_cfdi.search',
+  'catalog.forma_pago.search',
+  'catalog.metodo_pago.search',
+  'catalog.clave_producto_servicio.search',
+];
 
 /**
  * Planner: decide si Milo debe solo chatear o llamar una acción interna.
@@ -15,7 +35,7 @@ const ALLOWED_ACTIONS = ['templates.list'];
  * {
  *   "mode": "chat" | "tool",
  *   "reply": "texto opcional si mode=chat",
- *   "action": "templates.list" (si mode=tool),
+ *   "action": "<nombre del tool>" (si mode=tool),
  *   "input": { ... } // opcional
  * }
  */
@@ -29,19 +49,40 @@ async function planNextStep({ openai, history, message }) {
         '1) Responder tú mismo en modo chat (mode = "chat"), o',
         '2) Indicar que se debe ejecutar una acción interna de Milo (mode = "tool").',
         '',
-        'Acciones internas permitidas en esta fase:',
-        '- "templates.list": listar todas las plantillas disponibles del usuario actual.',
+        'Acciones internas permitidas (una sola por turno):',
+        '- "templates.list": listar las plantillas disponibles del usuario actual.',
+        '- "templates.contract": seleccionar una plantilla concreta y cargar su contrato/campos.',
+        '- "fill.missing": revisar qué campos faltan por rellenar en la plantilla seleccionada.',
+        '- "fill.suggest": proponer valores de ejemplo o por defecto para campos faltantes.',
+        '- "fill.set": registrar valores específicos que el usuario te proporcione para uno o varios campos.',
+        '- "fill.apply": combinar lo ya proporcionado y las sugerencias para dejar listo el payload final.',
+        '- "documents.create": generar un documento con la plantilla seleccionada y los datos capturados.',
+        '- "invoices.create": generar una factura (CFDI) usando la plantilla seleccionada y los datos capturados.',
+        '- "billing.contract": iniciar o continuar el flujo de activación de facturación (registro de RFC/CSD).',
+        '- "billing.missing": revisar qué datos o archivos faltan para completar el registro de facturación.',
+        '- "billing.register": enviar al backend los datos de facturación y archivos (.cer, .key) para activar la facturación.',
+        '- "assets.upload": registrar en Lyra un asset (logo, header, footer, background, image) previamente subido al bot.',
+        '- "assets.view": consultar el asset actual (por ejemplo el logo) configurado en Lyra.',
+        '- "knowledge.search": buscar información general en la base de conocimiento de Lyra.',
+        '- "catalog.regimen_fiscal.search": sugerir regímenes fiscales del SAT en base a una descripción.',
+        '- "catalog.uso_cfdi.search": sugerir usos de CFDI del SAT en base a una descripción.',
+        '- "catalog.forma_pago.search": sugerir formas de pago del SAT en base a una descripción.',
+        '- "catalog.metodo_pago.search": sugerir métodos de pago del SAT en base a una descripción.',
+        '- "catalog.clave_producto_servicio.search": sugerir claves de producto/servicio del SAT en base a una descripción.',
+        '',
+        'Reglas:',
+        '- Usa mode="tool" cuando el usuario pida explícitamente hacer algo con plantillas, documentos, facturas, facturación, assets o catálogos, o cuando sea OBVIO que esa acción es el siguiente paso lógico.',
+        '- Si el usuario solo tiene dudas, quiere explicaciones generales o la intención no es clara, usa mode="chat".',
+        '- Si decides usar una acción interna, elige exactamente UNA acción por turno.',
+        '- El campo "input" debe ser siempre un objeto JSON. Si no necesitas parámetros, usa un objeto vacío: {}.',
         '',
         'Responde SIEMPRE con un JSON válido, sin texto adicional, usando esta forma:',
         '{',
         '  "mode": "chat" | "tool",',
         '  "reply": "texto de respuesta si mode=chat",',
-        '  "action": "templates.list" | null,',
+        '  "action": "<nombre de la acción o null>",',
         '  "input": { ... objeto con parámetros si los hubiera }',
         '}',
-        '',
-        'Usa mode="tool" con action="templates.list" solo cuando el usuario pida ver, listar o conocer las plantillas disponibles.',
-        'En cualquier otro caso usa mode="chat" y pon en "reply" la respuesta que debería ver el usuario.',
       ].join('\n'),
     },
     ...history,
@@ -102,7 +143,8 @@ async function runChatOnly({ openai, history, message }) {
 }
 
 /**
- * Construye la respuesta final al usuario usando el resultado de un tool.
+ * Construye la respuesta final al usuario usando el resultado 
+ * de un tool.
  * Aquí el LLM ya sabe qué acción se ejecutó y tiene el JSON del resultado.
  */
 async function buildReplyFromTool({
@@ -129,33 +171,32 @@ async function buildReplyFromTool({
       content: String(message ?? ''),
     },
     {
-      role: 'assistant',
-      content: `He ejecutado la acción interna "${action}" con input: ${JSON.stringify(
-        input || {},
-      )}. Este es el resultado en JSON:\n\n${JSON.stringify(
-        toolResult,
-        null,
-        2,
-      )}\n\nAhora voy a explicártelo al usuario de forma amigable.`,
+      role: 'user',
+      name: 'milo_tool_result',
+      content: JSON.stringify({
+        action,
+        input: input || {},
+        result: toolResult,
+      }),
     },
   ];
 
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
     messages,
-    temperature: 0.2,
+    temperature: 0.3,
   });
 
   const reply =
     completion.choices?.[0]?.message?.content?.trim() ||
-    'Ejecuté la acción interna correctamente, pero no pude generar una explicación clara. Intenta preguntarme de nuevo.';
+    'No pude generar una respuesta útil a partir del resultado de la acción.';
   return reply;
 }
 
 /**
- * Fase 2 (primer paso): Milo puede decidir si:
+ * Fase 2: Milo puede decidir si:
  *  - Solo chatea (modo "chat"), o
- *  - Ejecuta una acción interna simple (por ahora: templates.list) y luego explica el resultado.
+ *  - Ejecuta una acción interna simple (cualquiera de las declaradas en ALLOWED_ACTIONS) y luego explica el resultado.
  */
 export async function runMiloBrain({
   sessionId = 'default',
@@ -187,7 +228,7 @@ export async function runMiloBrain({
       };
     }
 
-    // 3) Ejecutar acción interna (por ahora templates.list)
+    // 3) Ejecutar acción interna (cualquiera de las permitidas en ALLOWED_ACTIONS)
     const action = plan.action;
     const input = plan.input || {};
 
