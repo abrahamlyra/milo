@@ -44,10 +44,10 @@ const CATALOG_ACTIONS = [
 ];
 
 // Acciones críticas que requieren un templateId válido
+// ⚠️ OJO: aquí SOLO dejamos templates.contract.
+// documents.create e invoices.create usan el template ya seleccionado en sesión.
 const REQUIRES_TEMPLATE_ID = [
   'templates.contract',
-  'documents.create',
-  'invoices.create',
 ];
 
 /**
@@ -150,6 +150,16 @@ async function planNextStep({ openai, history, message }) {
         '  }',
         '- No inventes valores. Solo incluye en el input los campos que el usuario haya mencionado de forma razonablemente clara.',
         '- No uses acciones de "billing.*" cuando el usuario está hablando de una factura concreta para un cliente específico. "billing.*" es para registrar LOS DATOS DEL EMISOR y CSD en la plataforma, no para llenar una factura individual.',
+        '',
+        '📌 Regla para EMITIR / TIMBRAR la factura:',
+        '- Cuando ya se hayan capturado los datos principales de la factura (receptor + al menos un item) y el usuario diga cosas como:',
+        '  - "genera la factura",',
+        '  - "emite el CFDI",',
+        '  - "timbrala",',
+        '  - "haz la factura con esos datos",',
+        'debes usar:',
+        '  { "mode": "tool", "action": "invoices.create", "input": {} }',
+        '- No necesitas enviar templateId en el input porque la plantilla ya quedó seleccionada previamente con "templates.contract".',
         '',
         'Reglas específicas para activación de facturación (billing.register y fill.set, datos del EMISOR):',
         '- La activación de facturación se da cuando el usuario habla de registrar SU RFC y SU CSD en la plataforma, por ejemplo: "quiero activar la facturación", "registrar mi RFC", "subir mi CSD", "activar timbrado en Lyra".',
