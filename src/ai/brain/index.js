@@ -3,6 +3,7 @@ import { getOpenAIClient } from '../openaiClient.js';
 import { loadHistory, saveTurn } from '../memory/conversation.js';
 import { buildMessages } from './prompts.js';
 import { callMiloAction } from './toolsBridge.js';
+import { formatTemplatesList } from '../../webhook/helpers/formatters.js';
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
@@ -44,11 +45,19 @@ const CATALOG_ACTIONS = [
 ];
 
 // Acciones críticas que requieren un templateId válido
-// ⚠️ OJO: aquí SOLO dejamos templates.contract.
-// documents.create e invoices.create usan el template ya seleccionado en sesión.
 const REQUIRES_TEMPLATE_ID = [
   'templates.contract',
+  'documents.create',
+  'invoices.create',
 ];
+
+// Helper para validar UUID (no dejes pasar nombres comerciales como id)
+function isUUID(x) {
+  return (
+    typeof x === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x.trim())
+  );
+}
 
 /**
  * Planner: decide si Milo debe solo chatear o llamar una acción interna.
@@ -105,7 +114,7 @@ async function planNextStep({ openai, history, message }) {
         '- Si el usuario pregunta cosas como "qué plantillas tienes", "qué plantillas hay", "qué templates tengo", "lista de plantillas", debes usar SIEMPRE:',
         '  { "mode": "tool", "action": "templates.list", "input": {} }.',
         '',
-        '- Cuando haya en el historial una respuesta que enumera plantillas (por ejemplo: "Encontré 5 templates: 1. Mapfre Carta Finiquito — <id> ... 5. Factura Lyra Lite VPRO7 — <id>"), y el usuario diga frases como:',
+        '- Cuando haya en el historial una respuesta que enumera plantillas (por ejemplo: "Encontré 5 templates:\\n  1. Mapfre Carta Finiquito — <id> ...  5. Factura Lyra Lite VPRO7 — <id>"), y el usuario diga frases como:',
         '  "usar X", "quiero usar X", "usar la plantilla X", "quiero llenar la factura X", donde X es el nombre de una plantilla:',
         '  - Localiza en ese historial el template cuyo nombre coincida mejor con X.',
         '  - Toma su identificador (UUID) tal como aparece después del guion largo "—".',
@@ -113,7 +122,7 @@ async function planNextStep({ openai, history, message }) {
         '    "input": { "templateId": "<id_del_template_encontrado>" }',
         '',
         '- Si el usuario escribe explícitamente un ID después de "usar" (por ejemplo "usar 8fa93c19-5578-4fca-b9d1-99fce044d524"), puedes usar directamente ese valor como "input.templateId".',
-        '- Si no encuentras ningún id razonable en el historial y el usuario solo menciona el nombre, como último recurso puedes usar ese mismo nombre como "templateId".',
+        '- Si no encuentras ningún id razonable en el historial y el usuario solo menciona el nombre, NO uses el nombre comercial como "templateId" porque el backend espera un UUID válido. En ese caso debes usar mode="chat" y explicar al usuario que necesitas volver a listar las plantillas con su ID para continuar.',
         '',
         'Reglas para facturación CFDI (llenado de factura, NO activación de facturación):',
         '- Si el usuario habla de HACER UNA FACTURA o FACTURAR A ALGUIEN y menciona datos de un receptor específico + conceptos, debes tratarlo como llenado de CFDI con "fill.set", NO como activación de facturación.',
@@ -150,16 +159,6 @@ async function planNextStep({ openai, history, message }) {
         '  }',
         '- No inventes valores. Solo incluye en el input los campos que el usuario haya mencionado de forma razonablemente clara.',
         '- No uses acciones de "billing.*" cuando el usuario está hablando de una factura concreta para un cliente específico. "billing.*" es para registrar LOS DATOS DEL EMISOR y CSD en la plataforma, no para llenar una factura individual.',
-        '',
-        '📌 Regla para EMITIR / TIMBRAR la factura:',
-        '- Cuando ya se hayan capturado los datos principales de la factura (receptor + al menos un item) y el usuario diga cosas como:',
-        '  - "genera la factura",',
-        '  - "emite el CFDI",',
-        '  - "timbrala",',
-        '  - "haz la factura con esos datos",',
-        'debes usar:',
-        '  { "mode": "tool", "action": "invoices.create", "input": {} }',
-        '- No necesitas enviar templateId en el input porque la plantilla ya quedó seleccionada previamente con "templates.contract".',
         '',
         'Reglas específicas para activación de facturación (billing.register y fill.set, datos del EMISOR):',
         '- La activación de facturación se da cuando el usuario habla de registrar SU RFC y SU CSD en la plataforma, por ejemplo: "quiero activar la facturación", "registrar mi RFC", "subir mi CSD", "activar timbrado en Lyra".',
@@ -294,6 +293,16 @@ async function buildReplyFromTool({
   input,
   toolResult,
 }) {
+  // ⚙️ Caso especial: templates.list → usamos el mismo formateador
+  // que el flujo de comandos, para garantizar "Nombre — UUID" en el texto.
+  if (action === 'templates.list') {
+    const text = formatTemplatesList(toolResult || {});
+    const reply =
+      text ||
+      'No encontré templates disponibles en tu cuenta. Puedes cargar una plantilla desde Lyra Suite y volver a intentarlo.';
+    return reply;
+  }
+
   const messages = [
     {
       role: 'system',
@@ -383,15 +392,17 @@ export async function runMiloBrain({
       }
     }
 
-    // 👇 3.2. Si la acción requiere templateId y no viene, mejor nos vamos a chat
+    // 👇 3.2. Si la acción requiere templateId y no viene o no es UUID, mejor nos vamos a chat
     if (REQUIRES_TEMPLATE_ID.includes(action)) {
       const hasTemplateId =
         input &&
         typeof input.templateId === 'string' &&
-        input.templateId.trim().length > 0;
+        isUUID(input.templateId);
 
       if (!hasTemplateId) {
-        const reply = await runChatOnly({ openai, history, message });
+        const reply =
+          'Necesito el ID de la plantilla (UUID) para continuar. ' +
+          'Primero pide "qué plantillas tienes" y luego dime "usa la plantilla X" para que pueda tomar el ID correcto.';        
 
         saveTurn({
           sessionId,
@@ -414,7 +425,7 @@ export async function runMiloBrain({
       rawReq: rawPayload,
     });
 
-    // 4) Pedirle al modelo que explique el resultado al usuario
+    // 4) Pedirle al modelo (o al formateador) que explique el resultado al usuario
     const reply = await buildReplyFromTool({
       openai,
       history,
