@@ -45,10 +45,9 @@ const CATALOG_ACTIONS = [
 ];
 
 // Acciones críticas que requieren un templateId válido
+// 👉 EDICIÓN: Se eliminaron invoices.create y documents.create para no bloquear el flujo sin ID.
 const REQUIRES_TEMPLATE_ID = [
   'templates.contract',
-  'documents.create',
-  'invoices.create',
 ];
 
 // Helper para validar UUID (no dejes pasar nombres comerciales como id)
@@ -63,10 +62,10 @@ function isUUID(x) {
  * Planner: decide si Milo debe solo chatear o llamar una acción interna.
  * Devuelve siempre un JSON tipo:
  * {
- *   "mode": "chat" | "tool",
- *   "reply": "texto opcional si mode=chat",
- *   "action": "<nombre del tool>" (si mode=tool),
- *   "input": { ... } // opcional
+ * "mode": "chat" | "tool",
+ * "reply": "texto opcional si mode=chat",
+ * "action": "<nombre del tool>" (si mode=tool),
+ * "input": { ... } // opcional
  * }
  */
 async function planNextStep({ openai, history, message }) {
