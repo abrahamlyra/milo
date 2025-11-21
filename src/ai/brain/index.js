@@ -6,7 +6,7 @@ import { callMiloAction } from './toolsBridge.js';
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-// 🔒 Lista de acciones que el LLM puede disparar en esta primera fase
+// 🔒 Lista de acciones que el LLM puede disparar en esta fase
 const ALLOWED_ACTIONS = [
   'templates.list',
   'templates.contract',
@@ -27,6 +27,10 @@ const ALLOWED_ACTIONS = [
   'catalog.forma_pago.search',
   'catalog.metodo_pago.search',
   'catalog.clave_producto_servicio.search',
+  // 👇 NUEVO: tools de delivery para facturas / docs
+  'fill.delivery',
+  'fill.delivery.get',
+  'fill.delivery.reset',
 ];
 
 // Acciones de catálogo/knowledge que requieren forzosamente un query
@@ -50,17 +54,17 @@ const REQUIRES_TEMPLATE_ID = [
  * Planner: decide si Milo debe solo chatear o llamar una acción interna.
  * Devuelve siempre un JSON tipo:
  * {
- * "mode": "chat" | "tool",
- * "reply": "texto opcional si mode=chat",
- * "action": "<nombre del tool>" (si mode=tool),
- * "input": { ... } // opcional
+ *   "mode": "chat" | "tool",
+ *   "reply": "texto opcional si mode=chat",
+ *   "action": "<nombre del tool>" (si mode=tool),
+ *   "input": { ... } // opcional
  * }
  */
 async function planNextStep({ openai, history, message }) {
   const planningMessages = [
     {
       role: 'system',
-      // 🧠 PROMPT ACTUALIZADO: reglas de billing, fill.set y selección de plantillas
+      // 🧠 PROMPT ACTUALIZADO: reglas de billing, facturación CFDI, fill.set, selección de plantillas y delivery
       content: [
         'Eres el planner de Milo (no el que responde al usuario).',
         'Tu tarea es decidir una de dos opciones:',
@@ -76,7 +80,7 @@ async function planNextStep({ openai, history, message }) {
         '- "fill.apply": combinar lo ya proporcionado y las sugerencias para dejar listo el payload final.',
         '- "documents.create": generar un documento con la plantilla seleccionada y los datos capturados.',
         '- "invoices.create": generar una factura (CFDI) usando la plantilla seleccionada y los datos capturados.',
-        '- "billing.contract": iniciar o continuar el flujo de activación de facturación (registro de RFC/CSD).',
+        '- "billing.contract": iniciar o continuar el flujo de activación de facturación (registro de RFC/CSD en la PLATAFORMA, no una factura individual).',
         '- "billing.missing": revisar qué datos o archivos faltan para completar el registro de facturación.',
         '- "billing.register": enviar al backend los datos de facturación y archivos (.cer, .key) para activar la facturación.',
         '- "assets.upload": registrar en Lyra un asset (logo, header, footer, background, image) previamente subido al bot.',
@@ -87,9 +91,12 @@ async function planNextStep({ openai, history, message }) {
         '- "catalog.forma_pago.search": sugerir formas de pago del SAT en base a una descripción.',
         '- "catalog.metodo_pago.search": sugerir métodos de pago del SAT en base a una descripción.',
         '- "catalog.clave_producto_servicio.search": sugerir claves de producto/servicio del SAT en base a una descripción.',
+        '- "fill.delivery": configurar cómo se entregará el documento/factura (correo, SMS, ambos, ninguno).',
+        '- "fill.delivery.get": consultar la configuración de entrega actual.',
+        '- "fill.delivery.reset": limpiar la configuración de entrega.',
         '',
         'Reglas generales:',
-        '- Usa mode="tool" cuando el usuario pida explícitamente hacer algo con plantillas, documentos, facturas, facturación, assets o catálogos, o cuando sea OBVIO que esa acción es el siguiente paso lógico.',
+        '- Usa mode="tool" cuando el usuario pida explícitamente hacer algo con plantillas, documentos, facturas, facturación, assets, catálogos o entregas (correo/SMS), o cuando sea OBVIO que esa acción es el siguiente paso lógico.',
         '- Si el usuario solo tiene dudas, quiere explicaciones generales o la intención no es clara, usa mode="chat".',
         '- Si decides usar una acción interna, elige exactamente UNA acción por turno.',
         '- El campo "input" debe ser siempre un objeto JSON. Si no necesitas parámetros, usa un objeto vacío: {}.',
@@ -108,9 +115,46 @@ async function planNextStep({ openai, history, message }) {
         '- Si el usuario escribe explícitamente un ID después de "usar" (por ejemplo "usar 8fa93c19-5578-4fca-b9d1-99fce044d524"), puedes usar directamente ese valor como "input.templateId".',
         '- Si no encuentras ningún id razonable en el historial y el usuario solo menciona el nombre, como último recurso puedes usar ese mismo nombre como "templateId".',
         '',
-        'Reglas específicas para activación de facturación (billing.register y fill.set):',
+        'Reglas para facturación CFDI (llenado de factura, NO activación de facturación):',
+        '- Si el usuario habla de HACER UNA FACTURA o FACTURAR A ALGUIEN y menciona datos de un receptor específico + conceptos, debes tratarlo como llenado de CFDI con "fill.set", NO como activación de facturación.',
+        '- Ejemplos de frases que indican llenado de CFDI:',
+        '  - "Quiero facturarle a Felipe Sáenz Martínez, su RFC es SAMF..., régimen 612, CP 03103, correo ...".',
+        '  - "Genera una factura tipo I a nombre de X con este concepto...".',
+        '  - "Haz un CFDI de ingreso para el cliente X con este servicio...".',
+        '',
+        '- En ese caso, mapea lo que diga el usuario a las claves típicas de la plantilla de factura (ejemplo: Factura Lyra Lite VPRO7):',
+        '  - Nombre / razón social del receptor → "receptor_razon".',
+        '  - RFC del receptor → "receptor_rfc".',
+        '  - Régimen fiscal (código SAT) → "receptor_regimen".',
+        '  - Código postal del receptor → "receptor_cp".',
+        '  - Correo del receptor → "receptor_email".',
+        '  - Uso de CFDI → "uso_cfdi".',
+        '  - Forma de pago → "forma_pago".',
+        '  - Método de pago → "metodo_pago".',
+        '  - Tipo de comprobante (por ejemplo I) → "tipo".',
+        '  - Moneda (si la menciona) → "moneda".',
+        '  - Para cada concepto (item) indicado por el usuario:',
+        '    - Cantidad → "items[0].quantity", "items[1].quantity", etc. según el orden.',
+        '    - Descripción → "items[0].description", etc.',
+        '    - Clave producto/servicio (SAT) → "items[0].product_key", etc.',
+        '    - Precio unitario (sin impuestos) → "items[0].price", etc.',
+        '    - Unidad (unit_key) → "items[0].unit_key", etc.',
+        '',
+        '- En estos casos debes usar:',
+        '  {',
+        '    "mode": "tool",',
+        '    "action": "fill.set",',
+        '    "input": {',
+        '      "...": "valores que el usuario dio claramente mapeados a las claves anteriores"',
+        '    }',
+        '  }',
+        '- No inventes valores. Solo incluye en el input los campos que el usuario haya mencionado de forma razonablemente clara.',
+        '- No uses acciones de "billing.*" cuando el usuario está hablando de una factura concreta para un cliente específico. "billing.*" es para registrar LOS DATOS DEL EMISOR y CSD en la plataforma, no para llenar una factura individual.',
+        '',
+        'Reglas específicas para activación de facturación (billing.register y fill.set, datos del EMISOR):',
+        '- La activación de facturación se da cuando el usuario habla de registrar SU RFC y SU CSD en la plataforma, por ejemplo: "quiero activar la facturación", "registrar mi RFC", "subir mi CSD", "activar timbrado en Lyra".',
         '- Los campos típicos de activación de facturación incluyen: "name", "razon_social", "regimen_fiscal", "codigo_postal", "calle", "exterior", "colonia", "ciudad", "municipio", "estado", "csd_password".',
-        '- Si el usuario escribe frases donde claramente proporciona uno o varios de esos datos (por ejemplo: "nombre HECTOR ABRAHAM DE LA TORRE MALDONADO", "RAZON SOCIAL ...", "regimen fiscal es 612", "código postal 06250, calle X número exterior Y colonia Z ..."), debes usar mode="tool" con action="fill.set".',
+        '- Si el usuario escribe frases donde claramente proporciona esos datos del EMISOR junto con intención de activar la facturación, debes usar mode="tool" con action="fill.set".',
         '- En esos casos, construye "input" como un objeto JSON donde cada clave es el nombre del campo y el valor es lo que el usuario proporcionó. Ejemplo:',
         '  {',
         '    "mode": "tool",',
@@ -135,6 +179,27 @@ async function planNextStep({ openai, history, message }) {
         '  - "catalog.regimen_fiscal.search" cuando hable de régimen fiscal.',
         '- En ese caso, el campo "input.query" debe contener la descripción textual que dio el usuario.',
         '- Después de obtener las sugerencias del catálogo, el asistente (no tú como planner) le propondrá una opción al usuario y, cuando el usuario confirme, puedes usar en un siguiente turno la acción "fill.set" para escribir el código correcto en el campo correspondiente (por ejemplo "regimen_fiscal": "601" o "612").',
+        '',
+        'Reglas para entrega (correo / SMS / ambos / ninguno) de documentos y facturas:',
+        '- Si el usuario dice cosas como:',
+        '  - "mándala por correo", "envíala al correo X", "mándala al mail del cliente".',
+        '  - "mándala por SMS al número X".',
+        '  - "mándala por correo y SMS".',
+        '  - "no la mandes, solo genera el PDF".',
+        '- Entonces debes usar mode="tool" con action="fill.delivery".',
+        '',
+        '- Ejemplos de input para "fill.delivery":',
+        '  - Solo correo:',
+        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "email", "email": "cliente@dominio.com" } }',
+        '  - Solo SMS:',
+        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "sms", "phone": "+5255..." } }',
+        '  - Ambos:',
+        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "both", "email": "cliente@dominio.com", "phone": "+5255..." } }',
+        '  - Ninguno (solo generar documento):',
+        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "none" } }',
+        '',
+        '- Si el usuario pregunta cómo está configurada la entrega actual ("cómo la vas a mandar", "a qué correo la vas a enviar"), puedes usar "fill.delivery.get".',
+        '- Si el usuario quiere cambiar por completo la entrega ("no, ya no la mandes por correo, solo PDF"), puedes usar primero "fill.delivery.reset" y luego un nuevo "fill.delivery".',
         '',
         'Reglas de preferencia:',
         '- Si el usuario pide explícitamente "faltantes" o "faltantes facturación", prioriza usar "fill.missing" o "billing.missing" (según corresponda) en lugar de "chat".',
@@ -207,7 +272,7 @@ async function runChatOnly({ openai, history, message }) {
 }
 
 /**
- * Construye la respuesta final al usuario usando el resultado 
+ * Construye la respuesta final al usuario usando el resultado
  * de un tool.
  * Aquí el LLM ya sabe qué acción se ejecutó y tiene el JSON del resultado.
  */
@@ -277,7 +342,9 @@ export async function runMiloBrain({
 
     // 2) Si es solo chat → usamos el flujo de Fase 1
     if (plan.mode !== 'tool') {
-      const reply = plan.reply || (await runChatOnly({ openai, history, message }));
+      const reply =
+        plan.reply ||
+        (await runChatOnly({ openai, history, message }));
 
       saveTurn({
         sessionId,

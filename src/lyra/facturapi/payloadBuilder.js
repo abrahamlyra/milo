@@ -128,7 +128,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
   // moneda → upper
   const cur = getByPath(out, 'currency');
   if (cur != null) setByPath(out, 'currency', String(cur).toUpperCase());
-  
+
   // 2) Mayúsculas para payment_method (consistencia)
   const pm = getByPath(out, 'payment_method');
   if (pm != null) setByPath(out, 'payment_method', String(pm).toUpperCase());
@@ -164,7 +164,84 @@ export function buildFacturaPayloadData({ contract, fields }) {
       setByPath(out, 'payment_form', padPaymentForm(String(pf)));
     }
   })();
-  
+
+  /* ============================================
+   * 🔥 NORMALIZACIÓN CRÍTICA PARA FACTURAPI 🔥
+   * ============================================ */
+
+  // helper para quitar acentos y mandar a upper
+  const normalizeUpper = (str) => {
+    if (typeof str !== 'string') return str;
+    return str
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '') // quita acentos
+      .toUpperCase()
+      .replace(/[^A-Z0-9 .,@#\-]/g, ''); // limpia caracteres invalidos SAT
+  };
+
+  // helper número
+  const normalizeNumber = (v) => {
+    const n = Number(v);
+    return isNaN(n) ? v : n;
+  };
+
+  // 1) CUSTOMER (receptor)
+  const legal = getByPath(out, 'customer.legal_name');
+  if (legal) setByPath(out, 'customer.legal_name', normalizeUpper(legal));
+
+  const taxId = getByPath(out, 'customer.tax_id');
+  if (taxId) setByPath(out, 'customer.tax_id', normalizeUpper(taxId));
+
+  const email = getByPath(out, 'customer.email');
+  if (email) setByPath(out, 'customer.email', String(email).toLowerCase());
+
+  // 2) Items
+  if (Array.isArray(out.items)) {
+    out.items = out.items.map((item) => {
+      // qty
+      if (item.quantity != null) item.quantity = normalizeNumber(item.quantity);
+
+      // description
+      const desc = getByPath(item, 'product.description');
+      if (desc)
+        setByPath(item, 'product.description', normalizeUpper(desc));
+
+      // product_key
+      const key = getByPath(item, 'product.product_key');
+      if (key)
+        setByPath(item, 'product.product_key', normalizeUpper(key));
+
+      // unit_key
+      const unit = getByPath(item, 'product.unit_key');
+      if (unit)
+        setByPath(item, 'product.unit_key', normalizeUpper(unit));
+
+      // price
+      const price = getByPath(item, 'product.price');
+      if (price != null)
+        setByPath(item, 'product.price', normalizeNumber(price));
+
+      return item;
+    });
+  }
+
+  // 3) Campos CFDI altos
+  const pf = getByPath(out, 'payment_form');
+  if (pf) setByPath(out, 'payment_form', padPaymentForm(pf));
+
+  const pm2 = getByPath(out, 'payment_method');
+  if (pm2) setByPath(out, 'payment_method', normalizeUpper(pm2));
+
+  const uso = getByPath(out, 'use');
+  if (uso) setByPath(out, 'use', normalizeUpper(uso));
+
+  const cur2 = getByPath(out, 'currency');
+  if (cur2) setByPath(out, 'currency', normalizeUpper(cur2));
+
+  // tipo
+  const tipo = getByPath(out, 'type');
+  if (tipo) setByPath(out, 'type', normalizeUpper(tipo));
+
   return out;
 }
 
