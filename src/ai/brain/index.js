@@ -251,6 +251,28 @@ async function planNextStep({ openai, history, message }) {
     return { mode: 'chat', reply: null };
   }
 
+  // 👇👇👇 BLOQUE NUEVO AQUÍ 👇👇👇
+  // Regla HARD: si el planner escogió documents.create pero
+  // el usuario claramente está hablando de una FACTURA/CFDI,
+  // cambiamos a invoices.create para usar el flujo de Facturapi.
+  if (plan.action === 'documents.create') {
+    const msg = String(message ?? '').toLowerCase();
+    const facturaHints = [
+      'factura',
+      'facturar',
+      'cfdi',
+      'timbrar',
+      'timbrado',
+      'comprobante fiscal'
+    ];
+
+    const wantsInvoice = facturaHints.some(h => msg.includes(h));
+    if (wantsInvoice && ALLOWED_ACTIONS.includes('invoices.create')) {
+      plan.action = 'invoices.create';
+    }
+  }
+  // 👆👆👆 FIN DEL BLOQUE NUEVO 👆👆👆
+
   if (plan.input && typeof plan.input !== 'object') {
     plan.input = {};
   }
