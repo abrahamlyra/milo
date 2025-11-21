@@ -60,7 +60,7 @@ async function planNextStep({ openai, history, message }) {
   const planningMessages = [
     {
       role: 'system',
-      // 🧠 PROMPT ACTUALIZADO (Paso 3): Reglas de billing y fill.set
+      // 🧠 PROMPT ACTUALIZADO: reglas de billing, fill.set y selección de plantillas
       content: [
         'Eres el planner de Milo (no el que responde al usuario).',
         'Tu tarea es decidir una de dos opciones:',
@@ -94,7 +94,21 @@ async function planNextStep({ openai, history, message }) {
         '- Si decides usar una acción interna, elige exactamente UNA acción por turno.',
         '- El campo "input" debe ser siempre un objeto JSON. Si no necesitas parámetros, usa un objeto vacío: {}.',
         '',
-        'Reglas específicas para activación de facturación (billing.registerRFC y fill.set):',
+        'Reglas para plantillas y selección de contrato:',
+        '- Si el usuario pregunta cosas como "qué plantillas tienes", "qué plantillas hay", "qué templates tengo", "lista de plantillas", debes usar SIEMPRE:',
+        '  { "mode": "tool", "action": "templates.list", "input": {} }.',
+        '',
+        '- Cuando haya en el historial una respuesta que enumera plantillas (por ejemplo: "Encontré 5 templates: 1. Mapfre Carta Finiquito — <id> ... 5. Factura Lyra Lite VPRO7 — <id>"), y el usuario diga frases como:',
+        '  "usar X", "quiero usar X", "usar la plantilla X", "quiero llenar la factura X", donde X es el nombre de una plantilla:',
+        '  - Localiza en ese historial el template cuyo nombre coincida mejor con X.',
+        '  - Toma su identificador (UUID) tal como aparece después del guion largo "—".',
+        '  - Genera un plan con mode="tool", action="templates.contract" y:',
+        '    "input": { "templateId": "<id_del_template_encontrado>" }',
+        '',
+        '- Si el usuario escribe explícitamente un ID después de "usar" (por ejemplo "usar 8fa93c19-5578-4fca-b9d1-99fce044d524"), puedes usar directamente ese valor como "input.templateId".',
+        '- Si no encuentras ningún id razonable en el historial y el usuario solo menciona el nombre, como último recurso puedes usar ese mismo nombre como "templateId".',
+        '',
+        'Reglas específicas para activación de facturación (billing.register y fill.set):',
         '- Los campos típicos de activación de facturación incluyen: "name", "razon_social", "regimen_fiscal", "codigo_postal", "calle", "exterior", "colonia", "ciudad", "municipio", "estado", "csd_password".',
         '- Si el usuario escribe frases donde claramente proporciona uno o varios de esos datos (por ejemplo: "nombre HECTOR ABRAHAM DE LA TORRE MALDONADO", "RAZON SOCIAL ...", "regimen fiscal es 612", "código postal 06250, calle X número exterior Y colonia Z ..."), debes usar mode="tool" con action="fill.set".',
         '- En esos casos, construye "input" como un objeto JSON donde cada clave es el nombre del campo y el valor es lo que el usuario proporcionó. Ejemplo:',
