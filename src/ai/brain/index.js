@@ -321,7 +321,25 @@ async function buildReplyFromTool({
     const reply =
       text ||
       'No encontré templates disponibles en tu cuenta. Puedes cargar una plantilla desde Lyra Suite y volver a intentarlo.';
-    return reply;
+
+    // 👇👇👇 PARCHE 1: Estructurar templates para el front 👇👇👇
+    // Además del texto plano, preparamos una lista estructurada de templates
+    // para que el frontend pueda mostrar un selector visual (cards / modal).
+    const items = Array.isArray(toolResult?.items) ? toolResult.items : [];
+    const templates = items
+      .map((t) => ({
+        id: t.id || t.templateId || t._id || '',
+        name: t.name || t.title || t.templateName || '(sin nombre)',
+        type: t.type || t.kind || undefined,
+        description: t.description || t.summary || undefined,
+        // Si el backend ya manda una URL de preview la usamos; si no, el frontend
+        // puede construirla a partir del id y la base de Lyra API.
+        preview_url: t.preview_url || t.previewUrl || undefined,
+      }))
+      .filter((t) => t.id);
+
+    // 👈 OJO: ahora regresamos un objeto, no solo string
+    return { reply, templates };
   }
 
   const messages = [
@@ -423,7 +441,7 @@ export async function runMiloBrain({
       if (!hasTemplateId) {
         const reply =
           'Necesito el ID de la plantilla (UUID) para continuar. ' +
-          'Primero pide "qué plantillas tienes" y luego dime "usa la plantilla X" para que pueda tomar el ID correcto.';        
+          'Primero pide "qué plantillas tienes" y luego dime "usa la plantilla X" para que pueda tomar el ID correcto.';
 
         saveTurn({
           sessionId,
@@ -447,7 +465,7 @@ export async function runMiloBrain({
     });
 
     // 4) Pedirle al modelo (o al formateador) que explique el resultado al usuario
-    const reply = await buildReplyFromTool({
+    const built = await buildReplyFromTool({
       openai,
       history,
       message,
@@ -455,6 +473,17 @@ export async function runMiloBrain({
       input,
       toolResult,
     });
+
+    // 👇👇👇 PARCHE 2: Normalizar respuesta (string vs objeto) 👇👇👇
+    // El formateador puede devolver solo un string (reply "pelón")
+    // o un objeto { reply, ...extras }. Normalizamos aquí.
+    let reply = built;
+    let templates = undefined;
+
+    if (built && typeof built === 'object' && built.reply) {
+      reply = built.reply;
+      templates = built.templates;
+    }
 
     // 5) Guardar turno
     saveTurn({
@@ -468,6 +497,9 @@ export async function runMiloBrain({
       reply,
       usedTools: [action],
       rawToolResult: toolResult,
+      // Campo adicional pensado para el frontend (MiloChat) cuando la acción
+      // fue templates.list. Si no aplica, irá como undefined.
+      templates,
     };
   } catch (err) {
     console.error('[Milo][Brain] Error en runMiloBrain:', {

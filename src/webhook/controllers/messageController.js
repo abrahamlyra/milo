@@ -65,7 +65,7 @@ export function makeMessageController(contextFactory) {
             sessionId: sid,
             message: message,
             rawPayload: req,
-            contextFactory, 
+            contextFactory,
           });
 
           if (!brainResult?.ok) {
@@ -77,6 +77,8 @@ export function makeMessageController(contextFactory) {
             okReply(brainResult.reply, {
               mode: 'llm',
               usedTools: brainResult.usedTools || [],
+              // 👇 NUEVO: pasamos también la lista de templates (si aplica)
+              templates: brainResult.templates || undefined,
             }),
           );
         } catch (err) {
@@ -101,7 +103,8 @@ export function makeMessageController(contextFactory) {
       // Ejecutar tool
       const toolFactory = getTool(resolvedAction);
       const toolOrRunner = await toolFactory(perReqCtxFactory);
-      const runner = (typeof toolOrRunner === 'function') ? toolOrRunner : await toolFactory(perReqCtxFactory);
+      const runner =
+        (typeof toolOrRunner === 'function') ? toolOrRunner : await toolFactory(perReqCtxFactory);
       const result = await runner(resolvedInput || {});
 
       if (resolvedAction === 'templates.list') {
