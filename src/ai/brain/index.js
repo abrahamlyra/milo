@@ -54,8 +54,122 @@ const REQUIRES_TEMPLATE_ID = [
 function isUUID(x) {
   return (
     typeof x === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x.trim())
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      x.trim()
+    )
   );
+}
+
+/* ===========================================================
+   FAST-PATH: detectar "usar la plantilla X" sin preguntarle a GPT
+   Usa el historial donde ya listamos templates tipo:
+
+   1. Factura Lyra Lite VPRO7 — 8fa9c319-5578-4fca-b9d1-99fce044d524
+   2. Carta Demo — d1b9d310-...
+
+   Para convertir "Quiero usar la plantilla Factura Lyra Lite VPRO7"
+   en un plan directo:
+   { mode: "tool", action: "templates.contract", input: { templateId: <uuid> } }
+=========================================================== */
+
+// Saca del history el último bloque que parezca lista de templates
+function extractTemplatesFromHistory(history) {
+  if (!Array.isArray(history)) return [];
+
+  // Recorremos de atrás hacia adelante para tomar la lista más reciente
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
+    if (!m || m.role !== 'assistant' || !m.content) continue;
+
+    const text = String(m.content);
+    const regex =
+      /^\s*\d+\.\s+(.+?)\s+—\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/gim;
+
+    const found = [];
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+      const name = match[1]?.trim();
+      const id = match[2]?.trim();
+      if (name && id && isUUID(id)) {
+        found.push({ name, id });
+      }
+    }
+
+    if (found.length) return found;
+  }
+
+  return [];
+}
+
+// Elige el template mejor matcheado contra el mensaje del user
+function chooseTemplateFromMessage(message, templates) {
+  if (!message || !templates || !templates.length) return null;
+
+  const msg = String(message).toLowerCase();
+  // Quitamos comillas para que "Factura Lyra Lite VPRO7" y Factura... matcheen igual
+  const msgClean = msg.replace(/["“”']/g, '');
+
+  // 1) Si el usuario pegó directamente un UUID después de "usar ..."
+  const uuidMatch = msgClean.match(
+    /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+  );
+  if (uuidMatch && isUUID(uuidMatch[0])) {
+    const id = uuidMatch[0];
+    const templateById =
+      templates.find((t) => t.id === id) || { id, name: '(id directo)' };
+
+    return templateById;
+  }
+
+  // 2) Buscar por nombre dentro del mensaje
+  let best = null;
+  let bestScore = 0;
+
+  for (const t of templates) {
+    if (!t?.name) continue;
+    const name = String(t.name).toLowerCase();
+    const nameClean = name.replace(/["“”']/g, '');
+
+    if (!nameClean) continue;
+
+    if (msgClean.includes(nameClean)) {
+      // Heurística: nos quedamos con el nombre más largo que haga match
+      const score = nameClean.length;
+      if (score > bestScore) {
+        bestScore = score;
+        best = t;
+      }
+    }
+  }
+
+  return best;
+}
+
+// Construye un plan directo si detectamos "usar la plantilla ..."
+function buildFastTemplatePlan({ history, message }) {
+  if (!message || typeof message !== 'string') return null;
+  const text = message.toLowerCase();
+
+  // Solo activamos fast-path si claramente dice "usar" algo tipo plantilla/template/factura
+  const wantsUse =
+    /\busar\b/.test(text) &&
+    /\b(plantilla|template|factura)\b/.test(text);
+
+  if (!wantsUse) return null;
+
+  // Tomamos la lista de templates más reciente del historial
+  const templates = extractTemplatesFromHistory(history);
+  if (!templates.length) return null;
+
+  const chosen = chooseTemplateFromMessage(message, templates);
+  if (!chosen || !isUUID(chosen.id)) return null;
+
+  return {
+    mode: 'tool',
+    action: 'templates.contract',
+    reply: null,
+    input: { templateId: chosen.id },
+  };
 }
 
 /**
@@ -251,10 +365,8 @@ async function planNextStep({ openai, history, message }) {
     return { mode: 'chat', reply: null };
   }
 
-  // 👇👇👇 BLOQUE NUEVO AQUÍ 👇👇👇
-  // Regla HARD: si el planner escogió documents.create pero
-  // el usuario claramente está hablando de una FACTURA/CFDI,
-  // cambiamos a invoices.create para usar el flujo de Facturapi.
+  // 👇 BLOQUE: si el planner escogió documents.create pero el user claramente
+  // habla de factura/CFDI, forzamos invoices.create para usar el flujo de Facturapi
   if (plan.action === 'documents.create') {
     const msg = String(message ?? '').toLowerCase();
     const facturaHints = [
@@ -263,15 +375,14 @@ async function planNextStep({ openai, history, message }) {
       'cfdi',
       'timbrar',
       'timbrado',
-      'comprobante fiscal'
+      'comprobante fiscal',
     ];
 
-    const wantsInvoice = facturaHints.some(h => msg.includes(h));
+    const wantsInvoice = facturaHints.some((h) => msg.includes(h));
     if (wantsInvoice && ALLOWED_ACTIONS.includes('invoices.create')) {
       plan.action = 'invoices.create';
     }
   }
-  // 👆👆👆 FIN DEL BLOQUE NUEVO 👆👆👆
 
   if (plan.input && typeof plan.input !== 'object') {
     plan.input = {};
@@ -322,7 +433,6 @@ async function buildReplyFromTool({
       text ||
       'No encontré templates disponibles en tu cuenta. Puedes cargar una plantilla desde Lyra Suite y volver a intentarlo.';
 
-    // 👇👇👇 PARCHE 1: Estructurar templates para el front 👇👇👇
     // Además del texto plano, preparamos una lista estructurada de templates
     // para que el frontend pueda mostrar un selector visual (cards / modal).
     const items = Array.isArray(toolResult?.items) ? toolResult.items : [];
@@ -332,13 +442,10 @@ async function buildReplyFromTool({
         name: t.name || t.title || t.templateName || '(sin nombre)',
         type: t.type || t.kind || undefined,
         description: t.description || t.summary || undefined,
-        // Si el backend ya manda una URL de preview la usamos; si no, el frontend
-        // puede construirla a partir del id y la base de Lyra API.
         preview_url: t.preview_url || t.previewUrl || undefined,
       }))
       .filter((t) => t.id);
 
-    // 👈 OJO: ahora regresamos un objeto, no solo string
     return { reply, templates };
   }
 
@@ -395,8 +502,15 @@ export async function runMiloBrain({
   const history = loadHistory(sessionId);
 
   try {
-    // 1) Planner decide qué hacer
-    const plan = await planNextStep({ openai, history, message });
+    // 0) FAST-PATH: si el user acaba de decir "usar la plantilla X"
+    // y tenemos una lista de templates en el historial, saltamos planner
+    // y disparamos directamente templates.contract con el UUID correcto.
+    let plan = buildFastTemplatePlan({ history, message });
+
+    // 1) Planner decide qué hacer si no hubo fast-path
+    if (!plan) {
+      plan = await planNextStep({ openai, history, message });
+    }
 
     // 2) Si es solo chat → usamos el flujo de Fase 1
     if (plan.mode !== 'tool') {
@@ -426,7 +540,11 @@ export async function runMiloBrain({
       if (!input || typeof input !== 'object') {
         input = {};
       }
-      if (!input.query || typeof input.query !== 'string' || !input.query.trim()) {
+      if (
+        !input.query ||
+        typeof input.query !== 'string' ||
+        !input.query.trim()
+      ) {
         input.query = String(message ?? '');
       }
     }
@@ -474,9 +592,7 @@ export async function runMiloBrain({
       toolResult,
     });
 
-    // 👇👇👇 PARCHE 2: Normalizar respuesta (string vs objeto) 👇👇👇
-    // El formateador puede devolver solo un string (reply "pelón")
-    // o un objeto { reply, ...extras }. Normalizamos aquí.
+    // Normalizar respuesta (string vs objeto)
     let reply = built;
     let templates = undefined;
 
