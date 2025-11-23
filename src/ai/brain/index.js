@@ -54,7 +54,9 @@ const REQUIRES_TEMPLATE_ID = [
 function isUUID(x) {
   return (
     typeof x === 'string' &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x.trim())
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      x.trim()
+    )
   );
 }
 
@@ -251,10 +253,7 @@ async function planNextStep({ openai, history, message }) {
     return { mode: 'chat', reply: null };
   }
 
-  // 👇👇👇 BLOQUE NUEVO AQUÍ 👇👇👇
-  // Regla HARD: si el planner escogió documents.create pero
-  // el usuario claramente está hablando de una FACTURA/CFDI,
-  // cambiamos a invoices.create para usar el flujo de Facturapi.
+  // 👇👇👇 BLOQUE HARD: documents.create → invoices.create si es factura 👇👇👇
   if (plan.action === 'documents.create') {
     const msg = String(message ?? '').toLowerCase();
     const facturaHints = [
@@ -263,15 +262,20 @@ async function planNextStep({ openai, history, message }) {
       'cfdi',
       'timbrar',
       'timbrado',
-      'comprobante fiscal'
+      'comprobante fiscal',
     ];
 
-    const wantsInvoice = facturaHints.some(h => msg.includes(h));
-    if (wantsInvoice && ALLOWED_ACTIONS.includes('invoices.create')) {
+    const wantsInvoice = facturaHints.some((h) =>
+      msg.includes(h)
+    );
+    if (
+      wantsInvoice &&
+      ALLOWED_ACTIONS.includes('invoices.create')
+    ) {
       plan.action = 'invoices.create';
     }
   }
-  // 👆👆👆 FIN DEL BLOQUE NUEVO 👆👆👆
+  // 👆👆👆 FIN BLOQUE HARD 👆👆👆
 
   if (plan.input && typeof plan.input !== 'object') {
     plan.input = {};
@@ -314,14 +318,33 @@ async function buildReplyFromTool({
   input,
   toolResult,
 }) {
-  // ⚙️ Caso especial: templates.list → usamos el mismo formateador
-  // que el flujo de comandos, para garantizar "Nombre — UUID" en el texto.
+  // ⚙️ Caso especial: templates.list → texto + lista estructurada
   if (action === 'templates.list') {
-    const text = formatTemplatesList(toolResult || {});
-    const reply =
-      text ||
+    const text =
+      formatTemplatesList(toolResult || {}) ||
       'No encontré templates disponibles en tu cuenta. Puedes cargar una plantilla desde Lyra Suite y volver a intentarlo.';
-    return reply;
+
+    const items = Array.isArray(toolResult?.items)
+      ? toolResult.items
+      : [];
+
+    const templates = items
+      .map((t) => ({
+        id: t.id || t.templateId || t._id || '',
+        name:
+          t.name ||
+          t.title ||
+          t.templateName ||
+          '(sin nombre)',
+        type: t.type || t.kind || undefined,
+        description:
+          t.description || t.summary || undefined,
+        preview_url:
+          t.preview_url || t.previewUrl || undefined,
+      }))
+      .filter((t) => t.id);
+
+    return { reply: text, templates };
   }
 
   const messages = [
@@ -397,7 +420,7 @@ export async function runMiloBrain({
         rawReq: rawPayload,
       });
 
-      const reply = await buildReplyFromTool({
+      const built = await buildReplyFromTool({
         openai,
         history,
         message,
@@ -405,6 +428,11 @@ export async function runMiloBrain({
         input,
         toolResult,
       });
+
+      let reply = built;
+      if (built && typeof built === 'object' && built.reply) {
+        reply = built.reply;
+      }
 
       saveTurn({
         sessionId,
@@ -421,13 +449,21 @@ export async function runMiloBrain({
     }
 
     // 1) Planner decide qué hacer (si no cayó en el fast-path)
-    const plan = await planNextStep({ openai, history, message });
+    const plan = await planNextStep({
+      openai,
+      history,
+      message,
+    });
 
     // 2) Si es solo chat → usamos el flujo de Fase 1
     if (plan.mode !== 'tool') {
       const reply =
         plan.reply ||
-        (await runChatOnly({ openai, history, message }));
+        (await runChatOnly({
+          openai,
+          history,
+          message,
+        }));
 
       saveTurn({
         sessionId,
@@ -451,7 +487,11 @@ export async function runMiloBrain({
       if (!input || typeof input !== 'object') {
         input = {};
       }
-      if (!input.query || typeof input.query !== 'string' || !input.query.trim()) {
+      if (
+        !input.query ||
+        typeof input.query !== 'string' ||
+        !input.query.trim()
+      ) {
         input.query = String(message ?? '');
       }
     }
@@ -466,7 +506,7 @@ export async function runMiloBrain({
       if (!hasTemplateId) {
         const reply =
           'Necesito el ID de la plantilla (UUID) para continuar. ' +
-          'Primero pide "qué plantillas tienes" y luego dime "usa la plantilla X" para que pueda tomar el ID correcto.';        
+          'Primero pide "qué plantillas tienes" y luego dime "usa la plantilla X" para que pueda tomar el ID correcto.';
 
         saveTurn({
           sessionId,
@@ -490,7 +530,7 @@ export async function runMiloBrain({
     });
 
     // 4) Pedirle al modelo (o al formateador) que explique el resultado al usuario
-    const reply = await buildReplyFromTool({
+    const built = await buildReplyFromTool({
       openai,
       history,
       message,
@@ -498,6 +538,14 @@ export async function runMiloBrain({
       input,
       toolResult,
     });
+
+    // Normalizar respuesta (string vs objeto { reply, templates })
+    let reply = built;
+    let templates;
+    if (built && typeof built === 'object' && built.reply) {
+      reply = built.reply;
+      templates = built.templates;
+    }
 
     // 5) Guardar turno
     saveTurn({
@@ -511,6 +559,8 @@ export async function runMiloBrain({
       reply,
       usedTools: [action],
       rawToolResult: toolResult,
+      // Para que el frontend (MiloChat) pueda abrir el panel de previews
+      templates,
     };
   } catch (err) {
     console.error('[Milo][Brain] Error en runMiloBrain:', {
@@ -519,7 +569,8 @@ export async function runMiloBrain({
       data: err?.response?.data,
     });
 
-    const status = err?.status || err?.response?.status || 500;
+    const status =
+      err?.status || err?.response?.status || 500;
     const msg =
       'Hubo un error al procesar tu mensaje con el cerebro de Milo. ' +
       'Intenta de nuevo más tarde o usa los comandos manuales.';
