@@ -3,14 +3,19 @@ import { okReply, errorReply, needsAuth } from '../../core/dialog/replies.js';
 import { setUserInfo, extractTokenFromPayload } from '../../core/state/session.js';
 import { getTool } from '../../core/nlu/intentRouter.js';
 
-import { resolveActionAndInputFromMessage, initialHelpMessage, listTools, parseKV } from '../helpers/parsing.js';
+import {
+  resolveActionAndInputFromMessage,
+  initialHelpMessage,
+  listTools,
+  parseKV,
+} from '../helpers/parsing.js';
 import {
   formatTemplatesList,
   formatTemplatesContract,
   formatFillMissing,
   formatFillSuggest,
   formatFillApply,
-  // AÑADIDO: Importar los nuevos formateadores 
+  // AÑADIDO: Importar los nuevos formateadores
   formatDocumentsCreate,
   formatInvoicesCreate,
   // NUEVOS: billing
@@ -38,9 +43,16 @@ export function makeMessageController(contextFactory) {
       const token = extractTokenFromPayload(req.body);
       if (!token) return res.status(401).json(needsAuth());
 
-      const userInfo = { id: context?.user?.id || null, email: context?.user?.email || null };
+      const userInfo = {
+        id: context?.user?.id || null,
+        email: context?.user?.email || null,
+      };
       const sid = req.body?.sessionId ?? req.body?.context?.sessionId ?? 'default';
       setUserInfo(sid, userInfo);
+
+      // ✅ Factory por request (MOVIDO ARRIBA)
+      // Esto amarra req.body → contextFactory → orgId → X-Organization-Id
+      const perReqCtxFactory = makePerReqFactory(req);
 
       // Resolver acción
       let resolvedAction = action ?? null;
@@ -65,7 +77,8 @@ export function makeMessageController(contextFactory) {
             sessionId: sid,
             message: message,
             rawPayload: req,
-            contextFactory,
+            // ✅ CRÍTICO: pasar el factory por request, NO el global suelto
+            contextFactory: perReqCtxFactory,
           });
 
           if (!brainResult?.ok) {
@@ -79,7 +92,7 @@ export function makeMessageController(contextFactory) {
               usedTools: brainResult.usedTools || [],
               // 👇 NUEVO: pasamos también la lista de templates (si aplica)
               templates: brainResult.templates || undefined,
-            }),
+            })
           );
         } catch (err) {
           // Si algo truena MUY feo en el cerebro, también hacemos fallback al help.
@@ -87,9 +100,6 @@ export function makeMessageController(contextFactory) {
           return res.json(okReply(initialHelpMessage(), { actions: listTools() }));
         }
       }
-
-      // ⬇️ Factory por request
-      const perReqCtxFactory = makePerReqFactory(req);
 
       // 👀 Redirección contextual a billing.missing si estás en el wizard
       try {
@@ -104,7 +114,7 @@ export function makeMessageController(contextFactory) {
       const toolFactory = getTool(resolvedAction);
       const toolOrRunner = await toolFactory(perReqCtxFactory);
       const runner =
-        (typeof toolOrRunner === 'function') ? toolOrRunner : await toolFactory(perReqCtxFactory);
+        typeof toolOrRunner === 'function' ? toolOrRunner : await toolFactory(perReqCtxFactory);
       const result = await runner(resolvedInput || {});
 
       if (resolvedAction === 'templates.list') {
@@ -147,7 +157,10 @@ export function makeMessageController(contextFactory) {
           return res.json(okReply(msg, { result, ok: true }));
         } else {
           const status = result?.status || 400;
-          const msg = result?.message || formatBillingRegister(result) || '❌ Error activando facturación.';
+          const msg =
+            result?.message ||
+            formatBillingRegister(result) ||
+            '❌ Error activando facturación.';
           return res.status(status).json(errorReply(msg, status));
         }
       }
