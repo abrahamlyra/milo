@@ -2,7 +2,7 @@
 
 // Registro de tools y aliases (en memoria del proceso)
 const registry = new Map();
-const aliases  = new Map();
+const aliases = new Map();
 
 /* =========================
    Registro y consulta
@@ -38,10 +38,12 @@ export function getTool(name) {
 }
 
 export function listTools() {
-  return Array.from(new Set([
-    ...registry.keys(),
-    ...aliases.keys(),
-  ])).sort();
+  return Array.from(
+    new Set([
+      ...registry.keys(),
+      ...aliases.keys(),
+    ])
+  ).sort();
 }
 
 /* =========================
@@ -58,8 +60,18 @@ const NATURAL_ALIASES = [
   // sugerir / sugerir full → fill.suggest mode=...
   { re: /^sugerir(?:\s+(min|full))?$/i, action: 'fill.suggest', args: (m) => ({ mode: (m[1] || 'min').toLowerCase() }) },
 
-  // NUEVO: generar / generar documento → documents.create
+  // generar / generar documento → documents.create
   { re: /^generar(?:\s+documento)?$/i, action: 'documents.create', args: () => ({}) },
+
+  // facturar / generar factura → invoices.create
+  { re: /^(?:facturar|generar\s+factura)$/i, action: 'invoices.create', args: () => ({}) },
+
+  // emisores / listar emisores → emitters.list
+  { re: /^(?:emisores|listar\s+emisores|ver\s+emisores)$/i, action: 'emitters.list', args: () => ({}) },
+
+  // elegir emisor <id> / seleccionar emisor <id> / emisor <id> → emitters.select
+  { re: /^(?:elegir|seleccionar)\s+emisor\s+([a-z0-9-]{6,})$/i, action: 'emitters.select', args: (m) => ({ emitterId: m[1] }) },
+  { re: /^emisor\s+([a-z0-9-]{6,})$/i, action: 'emitters.select', args: (m) => ({ emitterId: m[1] }) },
 
   // aplicar → fill.apply
   { re: /^aplicar$/i, action: 'fill.apply', args: () => ({}) },
@@ -108,12 +120,13 @@ export function resolveActionName(text) {
 /**
  * Soporta key=value con:
  * - comillas dobles/simples: title="Mi título" desc='con espacios'
+ * - keys con dots/brackets: items[0].price=123 receptor.rfc=...
  * - números: page=2 → 2 (number), 02 → "02" (string)
  * - true/false → boolean
  */
 export function parseKV(rest = '') {
   const out = {};
-  const re = /(\w+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
+  const re = /([\w.\[\]]+)=("([^"]*)"|'([^']*)'|[^\s]+)/g;
   let m;
   while ((m = re.exec(rest)) !== null) {
     const key = m[1];
@@ -124,16 +137,19 @@ export function parseKV(rest = '') {
       out[key] = /^true$/i.test(raw);
       continue;
     }
+
     // number (sin ceros a la izquierda)
     if (/^[1-9][0-9]*$/.test(raw)) {
       out[key] = Number(raw);
       continue;
     }
+
     // float
     if (/^[0-9]+\.[0-9]+$/.test(raw)) {
       out[key] = Number(raw);
       continue;
     }
+
     out[key] = raw;
   }
   return out;

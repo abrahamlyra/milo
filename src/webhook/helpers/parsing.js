@@ -23,49 +23,82 @@ export function parseKV(rest = '') {
  */
 const ASSET_TYPE_ALIASES = {
   // tipos que ya coinciden 1:1
-  logo:        { tipo: 'logo',        rawTipo: 'logo' },
-  header:      { tipo: 'header',      rawTipo: 'header' },
-  footer:      { tipo: 'footer',      rawTipo: 'footer' },
-  background:  { tipo: 'background',  rawTipo: 'background' },
-  image:       { tipo: 'image',       rawTipo: 'image' },
+  logo: { tipo: 'logo', rawTipo: 'logo' },
+  header: { tipo: 'header', rawTipo: 'header' },
+  footer: { tipo: 'footer', rawTipo: 'footer' },
+  background: { tipo: 'background', rawTipo: 'background' },
+  image: { tipo: 'image', rawTipo: 'image' },
 
   // tipos que viene usando hoy el front
-  header_img:  { tipo: 'header',      rawTipo: 'header_img' },
-  footer_img:  { tipo: 'footer',      rawTipo: 'footer_img' },
-  watermark:   { tipo: 'background',  rawTipo: 'watermark' },
-  signature:   { tipo: 'image',       rawTipo: 'signature' },
+  header_img: { tipo: 'header', rawTipo: 'header_img' },
+  footer_img: { tipo: 'footer', rawTipo: 'footer_img' },
+  watermark: { tipo: 'background', rawTipo: 'watermark' },
+  signature: { tipo: 'image', rawTipo: 'signature' },
 };
 
 /** KV parser: natural language → acción + input */
 const NATURAL_ALIASES = [
-  { re: /^usar\s+([a-z0-9-]{8,})$/i,            action: 'templates.contract', args: m => ({ templateId: m[1] }) },
-  { re: /^faltantes$/i,                          action: 'fill.missing',       args: () => ({}) },
-  { re: /^sugerir(?:\s+(min|full))?$/i,          action: 'fill.suggest',       args: m => ({ mode: (m[1] || 'min').toLowerCase() }) },
-  { re: /^generar(?:\s+documento)?$/i,           action: 'documents.create',   args: () => ({}) },
-  { re: /^(?:facturar|generar\s+factura)$/i,     action: 'invoices.create',    args: () => ({}) },
-  { re: /^aplicar$/i,                            action: 'fill.apply',         args: () => ({}) },
-  { re: /^set\s+.+$/i,                           action: 'fill.set',           args: m => ({ __raw: m[0] }) },
+  { re: /^usar\s+([a-z0-9-]{8,})$/i, action: 'templates.contract', args: (m) => ({ templateId: m[1] }) },
+  { re: /^faltantes$/i, action: 'fill.missing', args: () => ({}) },
+  { re: /^sugerir(?:\s+(min|full))?$/i, action: 'fill.suggest', args: (m) => ({ mode: (m[1] || 'min').toLowerCase() }) },
+  { re: /^generar(?:\s+documento)?$/i, action: 'documents.create', args: () => ({}) },
+  { re: /^(?:facturar|generar\s+factura)$/i, action: 'invoices.create', args: () => ({}) },
+  { re: /^aplicar$/i, action: 'fill.apply', args: () => ({}) },
+  { re: /^set\s+.+$/i, action: 'fill.set', args: (m) => ({ __raw: m[0] }) },
+
+  // === Emitters (selección de emisor RFC)
+  // list
+  { re: /^(?:emisores|listar\s+emisores|ver\s+emisores)$/i, action: 'emitters.list', args: () => ({}) },
+
+  // select
+  // soporta: "elegir emisor <id>", "seleccionar emisor <id>", "emisor <id>"
+  {
+    re: /^(?:elegir|seleccionar)\s+emisor\s+([a-z0-9-]{6,})$/i,
+    action: 'emitters.select',
+    args: (m) => ({ emitter_id: m[1] }),
+  },
+  {
+    re: /^emisor\s+([a-z0-9-]{6,})$/i,
+    action: 'emitters.select',
+    args: (m) => ({ emitter_id: m[1] }),
+  },
+
+  // (opcionales / útiles)
+  { re: /^(?:emisor\s+actual|ver\s+emisor|emisor\?)$/i, action: 'emitters.getSelected', args: () => ({}) },
+  { re: /^(?:limpiar\s+emisor|reset\s+emisor|cambiar\s+emisor)$/i, action: 'emitters.reset', args: () => ({}) },
 
   // === Wizard de Activar facturación (billing)
-  { re: /^(activar\s+facturaci[oó]n|activar\s+csd|registro\s+rfc|alta\s+csd)$/i,
-    action: 'billing.contract', args: () => ({}) },
+  {
+    re: /^(activar\s+facturaci[oó]n|activar\s+csd|registro\s+rfc|alta\s+csd)$/i,
+    action: 'billing.contract',
+    args: () => ({}),
+  },
 
   // ⬇️ usa el checker que sí contempla cer/key en sesión
-  { re: /^(faltantes\s+facturaci[oó]n|faltantes\s+csd|faltantes\s+rfc)$/i,
-    action: 'billing.missing', args: () => ({}) },
+  {
+    re: /^(faltantes\s+facturaci[oó]n|faltantes\s+csd|faltantes\s+rfc)$/i,
+    action: 'billing.missing',
+    args: () => ({}),
+  },
 
-  { re: /^(sugerir\s+facturaci[oó]n|sugerir\s+csd)$/i,
-    action: 'fill.suggest', args: () => ({}) },
+  {
+    re: /^(sugerir\s+facturaci[oó]n|sugerir\s+csd)$/i,
+    action: 'fill.suggest',
+    args: () => ({}),
+  },
 
-  { re: /^(registrar\s+rfc|confirmar\s+facturaci[oó]n|activar\s+facturaci[oó]n\s+ahora)$/i,
-    action: 'billing.register', args: () => ({}) },
+  {
+    re: /^(registrar\s+rfc|confirmar\s+facturaci[oó]n|activar\s+facturaci[oó]n\s+ahora)$/i,
+    action: 'billing.register',
+    args: () => ({}),
+  },
 
   // === Assets (logo / header / footer / watermark / signature)
   // "subir <tipo>"
   {
     re: /^subir\s+(logo|header|footer|background|image|header_img|footer_img|watermark|signature)$/i,
     action: 'assets.upload',
-    args: m => {
+    args: (m) => {
       const raw = m[1].toLowerCase();
       const mapped = ASSET_TYPE_ALIASES[raw] || { tipo: raw, rawTipo: raw };
       return {
@@ -79,7 +112,7 @@ const NATURAL_ALIASES = [
   {
     re: /^ver\s+(logo|header|footer|background|image|header_img|footer_img|watermark|signature)$/i,
     action: 'assets.view',
-    args: m => {
+    args: (m) => {
       const raw = m[1].toLowerCase();
       const mapped = ASSET_TYPE_ALIASES[raw] || { tipo: raw, rawTipo: raw };
       return {
@@ -106,7 +139,9 @@ export function resolveActionAndInputFromMessage(msg) {
   try {
     getTool(text);
     return { action: text, input: {} };
-  } catch { /* no-op */ }
+  } catch {
+    /* no-op */
+  }
 
   // 3) "tool key=value ..."
   const m = text.match(/^([a-z0-9._-]+)\s+(.+)$/i);
@@ -116,7 +151,9 @@ export function resolveActionAndInputFromMessage(msg) {
       getTool(candidate);
       const kv = parseKV(m[2]);
       return { action: candidate, input: kv };
-    } catch { /* no-op */ }
+    } catch {
+      /* no-op */
+    }
   }
 
   return { action: null, input: null };
@@ -124,7 +161,7 @@ export function resolveActionAndInputFromMessage(msg) {
 
 /** Mensaje inicial por defecto */
 export function initialHelpMessage() {
-  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, `facturar`, `activar facturación`, `faltantes facturación`, `registrar rfc`, o `set key=valor`.';
+  return 'Estoy listo. Puedes escribir: `templates.list`, `usar <templateId>`, `faltantes`, `sugerir`, `sugerir full`, `aplicar`, `generar`, `facturar`, `emisores`, `elegir emisor <id>`, `emisor <id>`, `emisor actual`, `limpiar emisor`, `activar facturación`, `faltantes facturación`, `registrar rfc`, o `set key=valor`.';
 }
 
 export { listTools };

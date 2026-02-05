@@ -5,7 +5,13 @@ const sessions = new Map();
 export function getSession(sessionId) {
   if (!sessionId) return null;
   if (!sessions.has(sessionId)) sessions.set(sessionId, { provided: {}, meta: {} });
-  return sessions.get(sessionId);
+  const s = sessions.get(sessionId);
+
+  // hardening: asegurar shape estable
+  s.provided = s.provided || {};
+  s.meta = s.meta || {};
+
+  return s;
 }
 
 export function setUserInfo(sessionId, userInfo) {
@@ -24,6 +30,7 @@ export function initFilling(session, templateId, contract) {
   session.selectedTemplateId = templateId;
   session.contract = contract;
   session.provided = session.provided || {};
+  session.meta = session.meta || {};
   session.suggestion = null;
 }
 
@@ -51,9 +58,9 @@ export function setValue(session, key, value) {
 }
 
 export function computeMissing(session) {
-  const req = new Set((session.contract?.fields || []).filter(f => f.required).map(f => f.key));
+  const req = new Set((session.contract?.fields || []).filter((f) => f.required).map((f) => f.key));
   const got = new Set(listProvidedKeys(session.provided));
-  const missing = [...req].filter(k => !got.has(k));
+  const missing = [...req].filter((k) => !got.has(k));
   session.missing = missing;
   return missing;
 }

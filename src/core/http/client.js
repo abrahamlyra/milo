@@ -6,12 +6,14 @@ export function makeClient({ baseURL, timeoutMs, retries, getToken, getHeaders }
   const client = axios.create({ baseURL, timeout: timeoutMs });
 
   client.interceptors.request.use((cfg) => {
+    cfg.headers = cfg.headers || {};
+
     // Authorization
     const t = getToken?.();
     if (t) cfg.headers.Authorization = `Bearer ${t}`;
 
     // ✅ Extra headers (multi-tenant)
-    const extra = (typeof getHeaders === 'function') ? (getHeaders() || {}) : {};
+    const extra = typeof getHeaders === 'function' ? (getHeaders() || {}) : {};
     for (const [k, v] of Object.entries(extra)) {
       const vv = String(v ?? '').trim();
       if (vv) cfg.headers[k] = vv;

@@ -1,4 +1,3 @@
-// src/webhook/server.js
 import express from 'express';
 import cors from 'cors';
 
@@ -14,10 +13,13 @@ import { registerDocumentTools } from '../lyra/documents/index.js';
 import { registerFacturapiTools } from '../lyra/facturapi/index.js';
 import { registerUserTools } from '../lyra/user/index.js';
 import { registerAssetTools } from '../lyra/assets/index.js';
+import { registerKnowledgeTools } from '../knowledge/index.js';
+
+// ✅ NUEVO: emitters (multi-RFC)
+import { registerEmitterTools } from '../lyra/emitters/index.js';
 
 import billingUploads from './routes/billingUploads.js';
 import assetsUploads from './routes/assetsUploads.js';
-import { registerKnowledgeTools } from '../knowledge/index.js';
 
 // =========================
 // App base
@@ -56,15 +58,19 @@ const setCurrentReq = (req) => {
 
 const contextFactory = createContextFactory(getCurrentReq);
 
+// =========================
 // Registro de tools de Lyra
+// =========================
 registerTemplateTools(contextFactory);
 registerFillTools(contextFactory);
 registerDocumentTools(contextFactory);
 registerFacturapiTools(contextFactory);
 registerUserTools(contextFactory);
 registerAssetTools(contextFactory);
-registerKnowledgeTools(contextFactory); 
+registerKnowledgeTools(contextFactory);
 
+// ✅ NUEVO: emitir RFCs
+registerEmitterTools(contextFactory);
 
 // =========================
 // Rutas

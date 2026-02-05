@@ -26,6 +26,24 @@ import {
 // 🧠 NUEVO: importamos el cerebro LLM de Milo (Fase 1)
 import { runMiloBrain } from '../../ai/brain/index.js';
 
+function pickEmitterFlags(result) {
+  const r = result || {};
+  const reason = String(r.reason || r?.result?.reason || '').trim();
+  const needsEmitter =
+    r.needsEmitter === true ||
+    reason === 'needs_emitter';
+
+  const emitters =
+    (Array.isArray(r.emitters) ? r.emitters : null) ||
+    (Array.isArray(r?.result?.emitters) ? r.result.emitters : null) ||
+    [];
+
+  const organization_id =
+    r.organization_id ?? r?.result?.organization_id ?? null;
+
+  return { needsEmitter, reason: needsEmitter ? 'needs_emitter' : reason, emitters, organization_id };
+}
+
 export function makeMessageController(contextFactory) {
   // NOTE: `contextFactory` puede ser:
   //  - una función sin argumentos: () => ctx
@@ -117,12 +135,30 @@ export function makeMessageController(contextFactory) {
         typeof toolOrRunner === 'function' ? toolOrRunner : await toolFactory(perReqCtxFactory);
       const result = await runner(resolvedInput || {});
 
+      // ✅ Si el tool pide emisor, lo propagamos arriba (sin depender del front todavía)
+      const ef = pickEmitterFlags(result);
+
       if (resolvedAction === 'templates.list') {
         return res.json(okReply(formatTemplatesList(result), { result }));
       }
+
       if (resolvedAction === 'templates.contract') {
+        // Si el contract indica que es factura y falta emisor → UX determinístico
+        if (ef.needsEmitter) {
+          return res.json(
+            okReply('Necesitas escoger un emisor (RFC) para continuar con la factura.', {
+              result,
+              needsEmitter: true,
+              reason: 'needs_emitter',
+              emitters: ef.emitters,
+              organization_id: ef.organization_id,
+            })
+          );
+        }
+
         return res.json(okReply(formatTemplatesContract(result), { result }));
       }
+
       if (resolvedAction === 'fill.missing') {
         return res.json(okReply(formatFillMissing(result), { result }));
       }
@@ -143,6 +179,19 @@ export function makeMessageController(contextFactory) {
 
       // AÑADIDO: invoices.create
       if (resolvedAction === 'invoices.create') {
+        // Si falta emisor, propagamos flags (para que UI/consumidor sepa)
+        if (ef.needsEmitter) {
+          return res.json(
+            okReply(result?.message || 'Necesitas escoger un emisor (RFC) antes de timbrar la factura.', {
+              result,
+              needsEmitter: true,
+              reason: 'needs_emitter',
+              emitters: ef.emitters,
+              organization_id: ef.organization_id,
+            })
+          );
+        }
+
         return res.json(okReply(formatInvoicesCreate(result), { result }));
       }
 

@@ -5,7 +5,7 @@ export function formatTemplatesList(result) {
   const maxShow = 10;
   const lines = items.slice(0, maxShow).map((t, i) => {
     const name = t.name || t.title || t.templateName || `(sin nombre)`;
-    const id   = t.id || t.templateId || t._id || '(sin-id)';
+    const id = t.id || t.templateId || t._id || '(sin-id)';
     return `  ${i + 1}. ${name} — ${id}`;
   });
   const extra = items.length > maxShow ? `\n… y ${items.length - maxShow} más.` : '';
@@ -16,9 +16,28 @@ export function formatTemplatesList(result) {
 }
 
 export function formatTemplatesContract(result) {
+  // ✅ si el contract/gate viene con needsEmitter, damos UX útil sin depender del front
+  const reason = String(result?.reason || '').trim();
+  const needsEmitter = result?.needsEmitter === true || reason === 'needs_emitter';
+  if (needsEmitter) {
+    const emitters = Array.isArray(result?.emitters) ? result.emitters : [];
+    const lines = emitters.slice(0, 10).map((e, i) => {
+      const alias = e?.alias || '(sin-alias)';
+      const rfc = e?.rfc ? ` — ${e.rfc}` : '';
+      const id = e?.id || '(sin-id)';
+      return `  ${i + 1}. ${alias}${rfc} — ${id}`;
+    });
+    const extra = emitters.length > 10 ? `\n… y ${emitters.length - 10} más.` : '';
+    return [
+      `⚠️ Necesitas escoger un emisor (RFC) para continuar.`,
+      emitters.length ? `\nEmitters disponibles (${emitters.length}):\n${lines.join('\n')}${extra}` : `\nNo hay emitters disponibles para esta organización.`,
+      `\nUsa: "elegir emisor <id>"`,
+    ].join('\n');
+  }
+
   const reqs = Array.isArray(result?.required) ? result.required : [];
   const fields = Array.isArray(result?.fields) ? result.fields : [];
-  const opts = fields.filter(f => !f.required).map(f => f.key);
+  const opts = fields.filter((f) => !f.required).map((f) => f.key);
 
   const maxShow = 12;
   const reqLines = reqs.slice(0, maxShow).map((k, i) => `  ${i + 1}. ${k}`);
@@ -28,7 +47,7 @@ export function formatTemplatesContract(result) {
 
   const fieldLines = fields.slice(0, maxShow).map((f, i) => {
     const key = f.key || '(sin-key)';
-    const ty  = f.type || 'string';
+    const ty = f.type || 'string';
     const tag = f.required ? 'req' : 'opt';
     const hint = f.hint ? ` — ${f.hint}` : '';
     return `  ${i + 1}. [${tag}] ${key} <${ty}>${hint}`;
@@ -63,7 +82,7 @@ export function formatFillSuggest(result) {
 
 export function formatFillApply(result) {
   const applied = !!result?.applied;
-  const merged  = result?.merged || {};
+  const merged = result?.merged || {};
   const pretty = JSON.stringify(merged, null, 2);
   return applied
     ? `✔️ Sugerencia aplicada.\n\nEstado actual:\n${pretty}\n\nEscribe **faltantes** para verificar si ya quedó listo.`
@@ -93,8 +112,10 @@ export function formatDocumentsCreate(result) {
 
   if (result.reason === 'api_error') {
     const st = result.status || 0;
-    const d  = typeof result.detail === 'string' ? result.detail
-             : (result.detail?.message || JSON.stringify(result.detail));
+    const d =
+      typeof result.detail === 'string'
+        ? result.detail
+        : (result.detail?.message || JSON.stringify(result.detail));
     return `❌ La API rechazó la solicitud (HTTP ${st}).\n↳ ${d}`;
   }
 
@@ -105,11 +126,30 @@ export function formatDocumentsCreate(result) {
 export function formatInvoicesCreate(result) {
   if (!result || result.ok === undefined) return '❓ invoices.create: resultado desconocido.';
 
+  // ✅ needs_emitter / needsEmitter
+  const reason = String(result?.reason || '').trim();
+  const needsEmitter = result?.needsEmitter === true || reason === 'needs_emitter';
+  if (needsEmitter) {
+    const emitters = Array.isArray(result?.emitters) ? result.emitters : [];
+    const lines = emitters.slice(0, 10).map((e, i) => {
+      const alias = e?.alias || '(sin-alias)';
+      const rfc = e?.rfc ? ` — ${e.rfc}` : '';
+      const id = e?.id || '(sin-id)';
+      return `  ${i + 1}. ${alias}${rfc} — ${id}`;
+    });
+    const extra = emitters.length > 10 ? `\n… y ${emitters.length - 10} más.` : '';
+    return [
+      '⚠️ Necesitas escoger un emisor (RFC) antes de timbrar la factura.',
+      emitters.length ? `\nEmitters disponibles (${emitters.length}):\n${lines.join('\n')}${extra}` : `\nNo hay emitters disponibles para esta organización.`,
+      '\nUsa: "elegir emisor <id>"',
+    ].join('\n');
+  }
+
   if (result.ok) {
     const id = result.id ? `ID: ${result.id}\n` : '';
     const uuid = result.uuid ? `UUID: ${result.uuid}\n` : '';
     const link = result.pdfUrl ? `🔗 PDF: ${result.pdfUrl}` : '';
-    const xml  = result.xmlUrl ? `\n🧾 XML: ${result.xmlUrl}` : '';
+    const xml = result.xmlUrl ? `\n🧾 XML: ${result.xmlUrl}` : '';
     return `✅ ¡Factura timbrada y generada!\n${id}${uuid}${link}${xml}`.trim();
   }
 
@@ -124,8 +164,10 @@ export function formatInvoicesCreate(result) {
 
   if (result.reason === 'api_error') {
     const st = result.status || 0;
-    const d  = typeof result.detail === 'string' ? result.detail
-             : (result.detail?.message || JSON.stringify(result.detail));
+    const d =
+      typeof result.detail === 'string'
+        ? result.detail
+        : (result.detail?.message || JSON.stringify(result.detail));
     return `❌ La API de facturación rechazó la solicitud (HTTP ${st}).\n↳ ${d}`;
   }
 
@@ -139,7 +181,7 @@ export function formatBillingContract(resp) {
   return [
     '🧩 Activación de facturación lista.',
     `Requeridos: ${reqs || '(desconocidos)'}`,
-    'Usa: "faltantes", "sugerir", "aplicar", "registrar rfc".'
+    'Usa: "faltantes", "sugerir", "aplicar", "registrar rfc".',
   ].join('\n');
 }
 

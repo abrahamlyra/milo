@@ -28,10 +28,16 @@ const ALLOWED_ACTIONS = [
   'catalog.forma_pago.search',
   'catalog.metodo_pago.search',
   'catalog.clave_producto_servicio.search',
-  // 👇 NUEVO: tools de delivery para facturas / docs
+  // 👇 delivery
   'fill.delivery',
   'fill.delivery.get',
   'fill.delivery.reset',
+
+  // 👇 emitters (multi-RFC)
+  'emitters.list',
+  'emitters.select',
+  'emitters.getSelected',
+  'emitters.reset',
 ];
 
 // Acciones de catálogo/knowledge que requieren forzosamente un query
@@ -45,10 +51,7 @@ const CATALOG_ACTIONS = [
 ];
 
 // Acciones críticas que requieren un templateId válido
-// 👉 EDICIÓN: Se eliminaron invoices.create y documents.create para no bloquear el flujo sin ID.
-const REQUIRES_TEMPLATE_ID = [
-  'templates.contract',
-];
+const REQUIRES_TEMPLATE_ID = ['templates.contract'];
 
 // Helper para validar UUID (no dejes pasar nombres comerciales como id)
 function isUUID(x) {
@@ -58,6 +61,50 @@ function isUUID(x) {
       x.trim()
     )
   );
+}
+
+function isInvoiceTypeFromContract(contractResult) {
+  const t = String(contractResult?.type || '').trim().toLowerCase();
+  if (!t) return false;
+  return t.includes('invoice') || t.includes('factura');
+}
+
+function extractEmitterListToolResult(toolResult) {
+  const emitters = Array.isArray(toolResult?.emitters) ? toolResult.emitters : [];
+  return { emitters };
+}
+
+function formatEmittersListForUser(toolResult) {
+  const { emitters } = extractEmitterListToolResult(toolResult);
+
+  if (!emitters.length) {
+    return [
+      'No encontré emisores (RFCs) en esta organización.',
+      'Primero crea/activa un emisor en Lyra Suite (Facturación → Emisores) y luego vuelve aquí.',
+    ].join('\n');
+  }
+
+  const maxShow = 10;
+  const lines = emitters.slice(0, maxShow).map((e, i) => {
+    const alias = e.alias || '(sin alias)';
+    const rfc = e.rfc ? ` — ${e.rfc}` : '';
+    const id = e.id || '(sin-id)';
+    return `  ${i + 1}. ${alias}${rfc} — ${id}`;
+  });
+
+  const extra =
+    emitters.length > maxShow ? `\n… y ${emitters.length - maxShow} más.` : '';
+
+  return [
+    'Necesitas elegir un emisor (RFC) para esta factura.',
+    `Encontré ${emitters.length} emisores:`,
+    lines.join('\n') + extra,
+    '',
+    'Escribe por ejemplo:',
+    '  emisor <id>',
+    'o:',
+    '  elegir emisor <id>',
+  ].join('\n');
 }
 
 /**
@@ -74,7 +121,6 @@ async function planNextStep({ openai, history, message }) {
   const planningMessages = [
     {
       role: 'system',
-      // 🧠 PROMPT ACTUALIZADO: reglas de billing, facturación CFDI, fill.set, selección de plantillas y delivery
       content: [
         'Eres el planner de Milo (no el que responde al usuario).',
         'Tu tarea es decidir una de dos opciones:',
@@ -104,9 +150,11 @@ async function planNextStep({ openai, history, message }) {
         '- "fill.delivery": configurar cómo se entregará el documento/factura (correo, SMS, ambos, ninguno).',
         '- "fill.delivery.get": consultar la configuración de entrega actual.',
         '- "fill.delivery.reset": limpiar la configuración de entrega.',
+        '- "emitters.list": listar emisores (RFCs) disponibles para la organización actual.',
+        '- "emitters.select": seleccionar un emisor para usarlo en el flujo de factura.',
         '',
         'Reglas generales:',
-        '- Usa mode="tool" cuando el usuario pida explícitamente hacer algo con plantillas, documentos, facturas, facturación, assets, catálogos o entregas (correo/SMS), o cuando sea OBVIO que esa acción es el siguiente paso lógico.',
+        '- Usa mode="tool" cuando el usuario pida explícitamente hacer algo con plantillas, documentos, facturas, emisores, facturación, assets, catálogos o entregas (correo/SMS), o cuando sea OBVIO que esa acción es el siguiente paso lógico.',
         '- Si el usuario solo tiene dudas, quiere explicaciones generales o la intención no es clara, usa mode="chat".',
         '- Si decides usar una acción interna, elige exactamente UNA acción por turno.',
         '- El campo "input" debe ser siempre un objeto JSON. Si no necesitas parámetros, usa un objeto vacío: {}.',
@@ -115,105 +163,33 @@ async function planNextStep({ openai, history, message }) {
         '- Si el usuario pregunta cosas como "qué plantillas tienes", "qué plantillas hay", "qué templates tengo", "lista de plantillas", debes usar SIEMPRE:',
         '  { "mode": "tool", "action": "templates.list", "input": {} }.',
         '',
-        '- Cuando haya en el historial una respuesta que enumera plantillas (por ejemplo: "Encontré 5 templates:\\n  1. Mapfre Carta Finiquito — <id> ...  5. Factura Lyra Lite VPRO7 — <id>"), y el usuario diga frases como:',
-        '  "usar X", "quiero usar X", "usar la plantilla X", "quiero llenar la factura X", donde X es el nombre de una plantilla:',
+        '- Cuando haya en el historial una respuesta que enumera plantillas, y el usuario diga "usar X" donde X es el nombre de una plantilla:',
         '  - Localiza en ese historial el template cuyo nombre coincida mejor con X.',
         '  - Toma su identificador (UUID) tal como aparece después del guion largo "—".',
         '  - Genera un plan con mode="tool", action="templates.contract" y:',
         '    "input": { "templateId": "<id_del_template_encontrado>" }',
         '',
-        '- Si el usuario escribe explícitamente un ID después de "usar" (por ejemplo "usar 8fa93c19-5578-4fca-b9d1-99fce044d524"), puedes usar directamente ese valor como "input.templateId".',
-        '- Si no encuentras ningún id razonable en el historial y el usuario solo menciona el nombre, NO uses el nombre comercial como "templateId" porque el backend espera un UUID válido. En ese caso debes usar mode="chat" y explicar al usuario que necesitas volver a listar las plantillas con su ID para continuar.',
+        '- Si el usuario escribe explícitamente un ID después de "usar", puedes usar directamente ese valor como "input.templateId".',
+        '- Si no encuentras ningún id razonable, usa mode="chat" y explica que necesitas listar plantillas con su ID.',
+        '',
+        'Reglas para emisores (facturas multi-RFC):',
+        '- Si el usuario dice "emisores", "ver emisores", "lista de emisores", debes usar:',
+        '  { "mode": "tool", "action": "emitters.list", "input": {} }',
+        '- Si el usuario dice "emisor <id>" o "elegir emisor <id>", debes usar:',
+        '  { "mode": "tool", "action": "emitters.select", "input": { "emitter_id": "<id>" } }',
         '',
         'Reglas para facturación CFDI (llenado de factura, NO activación de facturación):',
-        '- Si el usuario habla de HACER UNA FACTURA o FACTURAR A ALGUIEN y menciona datos de un receptor específico + conceptos, debes tratarlo como llenado de CFDI con "fill.set", NO como activación de facturación.',
-        '- Ejemplos de frases que indican llenado de CFDI:',
-        '  - "Quiero facturarle a Felipe Sáenz Martínez, su RFC es SAMF..., régimen 612, CP 03103, correo ...".',
-        '  - "Genera una factura tipo I a nombre de X con este concepto...".',
-        '  - "Haz un CFDI de ingreso para el cliente X con este servicio...".',
+        '- Si el usuario habla de HACER UNA FACTURA o FACTURAR A ALGUIEN y menciona datos de receptor/conceptos, usa "fill.set" (no billing.*).',
+        '- No inventes valores. Solo incluye en el input lo que el usuario haya dicho claramente.',
         '',
-        '- En ese caso, mapea lo que diga el usuario a las claves típicas de la plantilla de factura (ejemplo: Factura Lyra Lite VPRO7):',
-        '  - Nombre / razón social del receptor → "receptor_razon".',
-        '  - RFC del receptor → "receptor_rfc".',
-        '  - Régimen fiscal (código SAT) → "receptor_regimen".',
-        '  - Código postal del receptor → "receptor_cp".',
-        '  - Correo del receptor → "receptor_email".',
-        '  - Uso de CFDI → "uso_cfdi".',
-        '  - Forma de pago → "forma_pago".',
-        '  - Método de pago → "metodo_pago".',
-        '  - Tipo de comprobante (por ejemplo I) → "tipo".',
-        '  - Moneda (si la menciona) → "moneda".',
-        '  - Para cada concepto (item) indicado por el usuario:',
-        '    - Cantidad → "items[0].quantity", "items[1].quantity", etc. según el orden.',
-        '    - Descripción → "items[0].description", etc.',
-        '    - Clave producto/servicio (SAT) → "items[0].product_key", etc.',
-        '    - Precio unitario (sin impuestos) → "items[0].price", etc.',
-        '    - Unidad (unit_key) → "items[0].unit_key", etc.',
+        'Reglas para activación de facturación (billing.*):',
+        '- billing.* es para registrar datos del EMISOR y CSD en la plataforma, no para una factura individual.',
         '',
-        '- En estos casos debes usar:',
-        '  {',
-        '    "mode": "tool",',
-        '    "action": "fill.set",',
-        '    "input": {',
-        '      "...": "valores que el usuario dio claramente mapeados a las claves anteriores"',
-        '    }',
-        '  }',
-        '- No inventes valores. Solo incluye en el input los campos que el usuario haya mencionado de forma razonablemente clara.',
-        '- No uses acciones de "billing.*" cuando el usuario está hablando de una factura concreta para un cliente específico. "billing.*" es para registrar LOS DATOS DEL EMISOR y CSD en la plataforma, no para llenar una factura individual.',
+        'Reglas para uso de catálogos SAT:',
+        '- Si el usuario describe pero no da el código, usa catalog.* con input.query.',
         '',
-        'Reglas específicas para activación de facturación (billing.register y fill.set, datos del EMISOR):',
-        '- La activación de facturación se da cuando el usuario habla de registrar SU RFC y SU CSD en la plataforma, por ejemplo: "quiero activar la facturación", "registrar mi RFC", "subir mi CSD", "activar timbrado en Lyra".',
-        '- Los campos típicos de activación de facturación incluyen: "name", "razon_social", "regimen_fiscal", "codigo_postal", "calle", "exterior", "colonia", "ciudad", "municipio", "estado", "csd_password".',
-        '- Si el usuario escribe frases donde claramente proporciona esos datos del EMISOR junto con intención de activar la facturación, debes usar mode="tool" con action="fill.set".',
-        '- En esos casos, construye "input" como un objeto JSON donde cada clave es el nombre del campo y el valor es lo que el usuario proporcionó. Ejemplo:',
-        '  {',
-        '    "mode": "tool",',
-        '    "action": "fill.set",',
-        '    "input": {',
-        '      "name": "HECTOR ABRAHAM DE LA TORRE MALDONADO",',
-        '      "razon_social": "HECTOR ABRAHAM DE LA TORRE MALDONADO",',
-        '      "codigo_postal": "06250",',
-        '      "calle": "Albeniz",',
-        '      "exterior": "11",',
-        '      "colonia": "Exhipódromo de Peralvillo",',
-        '      "ciudad": "Ciudad de México",',
-        '      "municipio": "Cuauhtémoc",',
-        '      "estado": "Ciudad de México",',
-        '      "csd_password": "TORRE1992"',
-        '    }',
-        '  }',
-        '- No inventes valores. Solo incluye en el input los campos que el usuario haya mencionado de forma razonablemente clara.',
-        '',
-        'Reglas para uso de catálogos SAT con los campos de facturación:',
-        '- Si el usuario describe su régimen fiscal sin dar el código (por ejemplo: "soy persona moral que factura servicios", "personas físicas con actividad empresarial"), usa mode="tool" con alguna acción de catálogo:',
-        '  - "catalog.regimen_fiscal.search" cuando hable de régimen fiscal.',
-        '- En ese caso, el campo "input.query" debe contener la descripción textual que dio el usuario.',
-        '- Después de obtener las sugerencias del catálogo, el asistente (no tú como planner) le propondrá una opción al usuario y, cuando el usuario confirme, puedes usar en un siguiente turno la acción "fill.set" para escribir el código correcto en el campo correspondiente (por ejemplo "regimen_fiscal": "601" o "612").',
-        '',
-        'Reglas para entrega (correo / SMS / ambos / ninguno) de documentos y facturas:',
-        '- Si el usuario dice cosas como:',
-        '  - "mándala por correo", "envíala al correo X", "mándala al mail del cliente".',
-        '  - "mándala por SMS al número X".',
-        '  - "mándala por correo y SMS".',
-        '  - "no la mandes, solo genera el PDF".',
-        '- Entonces debes usar mode="tool" con action="fill.delivery".',
-        '',
-        '- Ejemplos de input para "fill.delivery":',
-        '  - Solo correo:',
-        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "email", "email": "cliente@dominio.com" } }',
-        '  - Solo SMS:',
-        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "sms", "phone": "+5255..." } }',
-        '  - Ambos:',
-        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "both", "email": "cliente@dominio.com", "phone": "+5255..." } }',
-        '  - Ninguno (solo generar documento):',
-        '    { "mode": "tool", "action": "fill.delivery", "input": { "mode": "none" } }',
-        '',
-        '- Si el usuario pregunta cómo está configurada la entrega actual ("cómo la vas a mandar", "a qué correo la vas a enviar"), puedes usar "fill.delivery.get".',
-        '- Si el usuario quiere cambiar por completo la entrega ("no, ya no la mandes por correo, solo PDF"), puedes usar primero "fill.delivery.reset" y luego un nuevo "fill.delivery".',
-        '',
-        'Reglas de preferencia:',
-        '- Si el usuario pide explícitamente "faltantes" o "faltantes facturación", prioriza usar "fill.missing" o "billing.missing" (según corresponda) en lugar de "chat".',
-        '- Si el usuario habla de subir o cambiar logos u otros assets, prioriza "assets.upload" o "assets.view".',
+        'Reglas para entrega (correo / SMS / ambos / ninguno):',
+        '- Si el usuario pide envío por correo/SMS, usa fill.delivery.',
         '',
         'Responde SIEMPRE con un JSON válido, sin texto adicional, usando esta forma:',
         '{',
@@ -231,7 +207,7 @@ async function planNextStep({ openai, history, message }) {
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
     messages: planningMessages,
-    temperature: 0, // planner determinista
+    temperature: 0,
     response_format: { type: 'json_object' },
   });
 
@@ -253,7 +229,7 @@ async function planNextStep({ openai, history, message }) {
     return { mode: 'chat', reply: null };
   }
 
-  // 👇👇👇 BLOQUE HARD: documents.create → invoices.create si es factura 👇👇👇
+  // documents.create → invoices.create si el mensaje sugiere factura
   if (plan.action === 'documents.create') {
     const msg = String(message ?? '').toLowerCase();
     const facturaHints = [
@@ -265,17 +241,11 @@ async function planNextStep({ openai, history, message }) {
       'comprobante fiscal',
     ];
 
-    const wantsInvoice = facturaHints.some((h) =>
-      msg.includes(h)
-    );
-    if (
-      wantsInvoice &&
-      ALLOWED_ACTIONS.includes('invoices.create')
-    ) {
+    const wantsInvoice = facturaHints.some((h) => msg.includes(h));
+    if (wantsInvoice && ALLOWED_ACTIONS.includes('invoices.create')) {
       plan.action = 'invoices.create';
     }
   }
-  // 👆👆👆 FIN BLOQUE HARD 👆👆👆
 
   if (plan.input && typeof plan.input !== 'object') {
     plan.input = {};
@@ -306,45 +276,57 @@ async function runChatOnly({ openai, history, message }) {
 }
 
 /**
- * Construye la respuesta final al usuario usando el resultado
- * de un tool.
- * Aquí el LLM ya sabe qué acción se ejecutó y tiene el JSON del resultado.
+ * Construye la respuesta final al usuario usando el resultado de un tool.
  */
-async function buildReplyFromTool({
-  openai,
-  history,
-  message,
-  action,
-  input,
-  toolResult,
-}) {
-  // ⚙️ Caso especial: templates.list → texto + lista estructurada
+async function buildReplyFromTool({ openai, history, message, action, input, toolResult }) {
+  // templates.list → texto + lista estructurada
   if (action === 'templates.list') {
     const text =
       formatTemplatesList(toolResult || {}) ||
       'No encontré templates disponibles en tu cuenta. Puedes cargar una plantilla desde Lyra Suite y volver a intentarlo.';
 
-    const items = Array.isArray(toolResult?.items)
-      ? toolResult.items
-      : [];
+    const items = Array.isArray(toolResult?.items) ? toolResult.items : [];
 
     const templates = items
       .map((t) => ({
         id: t.id || t.templateId || t._id || '',
-        name:
-          t.name ||
-          t.title ||
-          t.templateName ||
-          '(sin nombre)',
+        name: t.name || t.title || t.templateName || '(sin nombre)',
         type: t.type || t.kind || undefined,
-        description:
-          t.description || t.summary || undefined,
-        preview_url:
-          t.preview_url || t.previewUrl || undefined,
+        description: t.description || t.summary || undefined,
+        preview_url: t.preview_url || t.previewUrl || undefined,
       }))
       .filter((t) => t.id);
 
     return { reply: text, templates };
+  }
+
+  // emitters.list → respuesta directa (sin LLM)
+  if (action === 'emitters.list') {
+    return formatEmittersListForUser(toolResult || {});
+  }
+
+  // emitters.select → confirmar directo (sin LLM)
+  if (action === 'emitters.select') {
+    const ok = !!toolResult?.ok;
+    if (!ok) {
+      return (
+        toolResult?.message ||
+        'No pude seleccionar ese emisor. Verifica el id e inténtalo de nuevo.'
+      );
+    }
+    const id = toolResult?.emitter_id || '(emisor)';
+    return `✅ Emisor seleccionado: ${id}\nAhora ya puedes seguir llenando la factura (set ...), revisar faltantes, y facturar.`;
+  }
+
+  // emitters.getSelected → respuesta directa
+  if (action === 'emitters.getSelected') {
+    const id = toolResult?.emitter_id || null;
+    return id ? `📌 Emisor actual: ${id}` : '📌 No hay emisor seleccionado todavía.';
+  }
+
+  // emitters.reset → respuesta directa
+  if (action === 'emitters.reset') {
+    return '🧹 Emisor limpiado. Ahora puedes elegir otro con: emisor <id>';
   }
 
   const messages = [
@@ -358,10 +340,7 @@ async function buildReplyFromTool({
       ].join('\n'),
     },
     ...history,
-    {
-      role: 'user',
-      content: String(message ?? ''),
-    },
+    { role: 'user', content: String(message ?? '') },
     {
       role: 'user',
       name: 'milo_tool_result',
@@ -387,22 +366,20 @@ async function buildReplyFromTool({
 
 /**
  * Fase 2: Milo puede decidir si:
- * - Solo chatea (modo "chat"), o
- * - Ejecuta una acción interna simple (cualquiera de las declaradas en ALLOWED_ACTIONS) y luego explica el resultado.
+ * - Solo chatea, o
+ * - Ejecuta una acción interna simple y explica el resultado.
  */
 export async function runMiloBrain({
   sessionId = 'default',
   message,
-  rawPayload, // aquí vamos a recibir el req completo desde el controller
+  rawPayload, // req completo desde el controller
   contextFactory,
 }) {
   const openai = getOpenAIClient();
   const history = loadHistory(sessionId);
 
   try {
-    // 🔥 0) FAST-PATH para "usar template <UUID>" disparado desde el front
-    // Ejemplo exacto que manda el MiloChat:
-    //   sendSilent(`usar template ${tpl.id}`);
+    // 🔥 FAST-PATH: "usar template <UUID>" disparado desde el front
     const m = String(message ?? '').trim();
     const match = m.match(
       /^usar\s+template\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
@@ -419,6 +396,50 @@ export async function runMiloBrain({
         contextFactory,
         rawReq: rawPayload,
       });
+
+      // ✅ Si la plantilla es factura, inmediatamente listamos emisores
+      if (isInvoiceTypeFromContract(toolResult)) {
+        const emitAction = 'emitters.list';
+        const emitResult = await callMiloAction({
+          action: emitAction,
+          input: {},
+          contextFactory,
+          rawReq: rawPayload,
+        });
+
+        const contractReply = await buildReplyFromTool({
+          openai,
+          history,
+          message,
+          action,
+          input,
+          toolResult,
+        });
+
+        const emitReply = formatEmittersListForUser(emitResult || {});
+        const replyText = [
+          typeof contractReply === 'string'
+            ? contractReply
+            : contractReply?.reply || '',
+          '',
+          emitReply,
+        ]
+          .filter(Boolean)
+          .join('\n');
+
+        saveTurn({
+          sessionId,
+          userMessage: message,
+          assistantMessage: replyText,
+        });
+
+        return {
+          ok: true,
+          reply: replyText,
+          usedTools: [action, emitAction],
+          rawToolResult: toolResult,
+        };
+      }
 
       const built = await buildReplyFromTool({
         openai,
@@ -448,14 +469,14 @@ export async function runMiloBrain({
       };
     }
 
-    // 1) Planner decide qué hacer (si no cayó en el fast-path)
+    // 1) Planner decide
     const plan = await planNextStep({
       openai,
       history,
       message,
     });
 
-    // 2) Si es solo chat → usamos el flujo de Fase 1
+    // 2) Modo chat
     if (plan.mode !== 'tool') {
       const reply =
         plan.reply ||
@@ -478,30 +499,22 @@ export async function runMiloBrain({
       };
     }
 
-    // 3) Ejecutar acción interna (cualquiera de las permitidas en ALLOWED_ACTIONS)
+    // 3) Ejecutar acción
     const action = plan.action;
     let input = plan.input || {};
 
-    // 👇 3.1. Si es un catálogo / knowledge, garantizamos input.query
+    // 3.1 Catálogos / knowledge: garantizar input.query
     if (CATALOG_ACTIONS.includes(action)) {
-      if (!input || typeof input !== 'object') {
-        input = {};
-      }
-      if (
-        !input.query ||
-        typeof input.query !== 'string' ||
-        !input.query.trim()
-      ) {
+      if (!input || typeof input !== 'object') input = {};
+      if (!input.query || typeof input.query !== 'string' || !input.query.trim()) {
         input.query = String(message ?? '');
       }
     }
 
-    // 👇 3.2. Si la acción requiere templateId y no viene o no es UUID, mejor nos vamos a chat
+    // 3.2 Si la acción requiere templateId y no viene o no es UUID → chat
     if (REQUIRES_TEMPLATE_ID.includes(action)) {
       const hasTemplateId =
-        input &&
-        typeof input.templateId === 'string' &&
-        isUUID(input.templateId);
+        input && typeof input.templateId === 'string' && isUUID(input.templateId);
 
       if (!hasTemplateId) {
         const reply =
@@ -529,7 +542,49 @@ export async function runMiloBrain({
       rawReq: rawPayload,
     });
 
-    // 4) Pedirle al modelo (o al formateador) que explique el resultado al usuario
+    // ✅ Si acaban de seleccionar contrato de factura, inmediatamente listamos emisores
+    if (action === 'templates.contract' && isInvoiceTypeFromContract(toolResult)) {
+      const emitAction = 'emitters.list';
+      const emitResult = await callMiloAction({
+        action: emitAction,
+        input: {},
+        contextFactory,
+        rawReq: rawPayload,
+      });
+
+      const builtContract = await buildReplyFromTool({
+        openai,
+        history,
+        message,
+        action,
+        input,
+        toolResult,
+      });
+
+      const emitReply = formatEmittersListForUser(emitResult || {});
+      const replyText = [
+        typeof builtContract === 'string' ? builtContract : builtContract?.reply || '',
+        '',
+        emitReply,
+      ]
+        .filter(Boolean)
+        .join('\n');
+
+      saveTurn({
+        sessionId,
+        userMessage: message,
+        assistantMessage: replyText,
+      });
+
+      return {
+        ok: true,
+        reply: replyText,
+        usedTools: [action, emitAction],
+        rawToolResult: toolResult,
+      };
+    }
+
+    // 4) Explicar resultado
     const built = await buildReplyFromTool({
       openai,
       history,
@@ -539,7 +594,6 @@ export async function runMiloBrain({
       toolResult,
     });
 
-    // Normalizar respuesta (string vs objeto { reply, templates })
     let reply = built;
     let templates;
     if (built && typeof built === 'object' && built.reply) {
@@ -559,7 +613,6 @@ export async function runMiloBrain({
       reply,
       usedTools: [action],
       rawToolResult: toolResult,
-      // Para que el frontend (MiloChat) pueda abrir el panel de previews
       templates,
     };
   } catch (err) {
@@ -569,8 +622,7 @@ export async function runMiloBrain({
       data: err?.response?.data,
     });
 
-    const status =
-      err?.status || err?.response?.status || 500;
+    const status = err?.status || err?.response?.status || 500;
     const msg =
       'Hubo un error al procesar tu mensaje con el cerebro de Milo. ' +
       'Intenta de nuevo más tarde o usa los comandos manuales.';

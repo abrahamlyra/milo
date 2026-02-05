@@ -24,8 +24,15 @@ export function createContextFactory(getCurrentReq) {
       retries: config.httpRetries,
       getToken: () => tokenCache ?? token,
 
-      // ✅ Header para TODAS las llamadas de Milo a Lyra
-      getHeaders: () => (orgId ? { 'X-Organization-Id': orgId } : {}),
+      // ✅ Headers para TODAS las llamadas de Milo a Lyra
+      // Importante: Lyra API a veces espera ambos.
+      getHeaders: () => {
+        if (!orgId) return {};
+        return {
+          'X-Organization-Id': orgId,
+          'X-Org-Id': orgId,
+        };
+      },
     });
 
     return {

@@ -2,11 +2,21 @@
 import { registerTool } from '../../core/nlu/intentRouter.js';
 import { buildFacturaPayloadData } from './payloadBuilder.js';
 
+function isInvoiceType(rawType) {
+  const t = String(rawType || '').trim().toLowerCase();
+  if (!t) return false;
+  return t.includes('invoice') || t.includes('factura') || t === 'cfdi';
+}
+
 export function registerFacturapiTools(contextFactory) {
-  registerTool('invoices.create', () => {
-    const ctx = contextFactory();
+  registerTool('invoices.create', async (injectedFactory) => {
+    // Prefer injected factory (per-request) to ensure correct token/org/session
+    const cf = injectedFactory || contextFactory;
+
     return async (_input = {}) => {
+      const ctx = cf();
       const s = ctx.session || {};
+
       const tid = s.selectedTemplateId;
       if (!tid) throw new Error('No hay plantilla seleccionada. Usa: usar <templateId>');
 
@@ -14,7 +24,7 @@ export function registerFacturapiTools(contextFactory) {
       if (!contract) throw new Error('Contract no cargado para esta plantilla.');
 
       const type = String(contract.type || '').toLowerCase();
-      if (!(type.includes('invoice') || type.includes('factura'))) {
+      if (!isInvoiceType(type)) {
         return {
           ok: false,
           reason: 'wrong_type',
@@ -22,18 +32,61 @@ export function registerFacturapiTools(contextFactory) {
         };
       }
 
-      const provided = (s.provided && s.provided[tid]) ? s.provided[tid] : {};
+      // ✅ Multi-RFC: require selected emitter in session
+      s.meta = s.meta || {};
+      const selectedEmitterId = String(s.meta.selectedEmitterId || '').trim();
+
+      if (!selectedEmitterId) {
+        // deterministic wizard step: ask for emitter selection
+        s.meta.awaitingEmitter = true;
+
+        let emitters = [];
+        let organization_id = null;
+
+        try {
+          const r = await ctx.http.get('/emitters');
+          organization_id = r?.data?.organization_id ?? null;
+          emitters = Array.isArray(r?.data?.emitters) ? r.data.emitters : [];
+        } catch (e) {
+          // If emitters list fails, still return needsEmitter with a helpful message
+          const detail = e?.response?.data || e?.message || String(e);
+          console.error('❌ Error listando emitters (needs_emitter):', detail);
+        }
+
+        return {
+          ok: false,
+          reason: 'needs_emitter',
+          needsEmitter: true,
+          organization_id,
+          emitters,
+          message: 'Necesitas escoger un emisor (RFC) antes de timbrar la factura.',
+        };
+      }
+
+      // Clear awaiting flag once we have a selection
+      s.meta.awaitingEmitter = false;
+
+      const provided = s.provided && s.provided[tid] ? s.provided[tid] : {};
 
       // 1. Requeridos
-      const requiredKeys = Array.isArray(contract.required) && contract.required.length
-        ? contract.required
-        : (Array.isArray(contract.fields)
-            ? contract.fields.filter(f => f?.required).map(f => f.key).filter(Boolean)
-            : []);
-      
+      const requiredKeys =
+        Array.isArray(contract.required) && contract.required.length
+          ? contract.required
+          : Array.isArray(contract.fields)
+            ? contract.fields
+                .filter((f) => f?.required)
+                .map((f) => f.key)
+                .filter(Boolean)
+            : [];
+
       const missing = computeMissing(requiredKeys, provided);
       if (missing.length) {
-        return { ok: false, reason: 'missing', missing, message: `Faltan campos requeridos: ${missing.join(', ')}` };
+        return {
+          ok: false,
+          reason: 'missing',
+          missing,
+          message: `Faltan campos requeridos: ${missing.join(', ')}`,
+        };
       }
 
       // 2. Normalización y RECONSTRUCCIÓN DE CEROS
@@ -61,7 +114,7 @@ export function registerFacturapiTools(contextFactory) {
       const delivery = s.delivery?.[tid] || { mode: 'none' };
       const deliveryMode = String(delivery.mode || 'none').toLowerCase();
       const wantsEmail = deliveryMode === 'email' || deliveryMode === 'both';
-      const wantsSms   = deliveryMode === 'sms'   || deliveryMode === 'both';
+      const wantsSms = deliveryMode === 'sms' || deliveryMode === 'both';
 
       const emailTo =
         delivery?.email?.to ??
@@ -80,20 +133,22 @@ export function registerFacturapiTools(contextFactory) {
 
       const body = {
         template_id: tid,
+        emitter_id: selectedEmitterId, // ✅ required by Lyra API (multi-RFC)
         datos_factura,
         modo: modeInput,
         skipSend: _input.skipSend ?? false,
       };
 
       if (wantsEmail && emailTo) body.email = emailTo;
-      if (wantsSms && phoneTo)   body.phone = phoneTo;
+      if (wantsSms && phoneTo) body.phone = phoneTo;
 
       // Log FINAL
       console.log('🧾 FACTURA → payload final:', {
         tid,
+        emitter_id: selectedEmitterId,
         product_key_sample: datos_factura.items?.[0]?.product_key, // <-- CHECAR ESTO EN LOG
         payment_form: datos_factura.payment_form,
-        notif: { wantsEmail, emailTo }
+        notif: { wantsEmail, emailTo },
       });
 
       try {
@@ -127,8 +182,11 @@ function computeMissing(requiredKeys = [], provided = {}) {
     if (/^items\[\]\./.test(key)) {
       const prop = key.replace(/^items\[\]\./, '');
       const arr = provided?.items;
-      if (!Array.isArray(arr) || arr.length === 0) { miss.push(key); continue; }
-      const anyFilled = arr.some(row => {
+      if (!Array.isArray(arr) || arr.length === 0) {
+        miss.push(key);
+        continue;
+      }
+      const anyFilled = arr.some((row) => {
         const v = row?.[prop];
         return !(v === undefined || v === null || String(v).trim?.() === '');
       });
@@ -137,9 +195,12 @@ function computeMissing(requiredKeys = [], provided = {}) {
     }
     if (key === 'items[]') {
       const arr = provided?.items;
-      if (!Array.isArray(arr) || arr.length === 0) { miss.push(key); continue; }
+      if (!Array.isArray(arr) || arr.length === 0) {
+        miss.push(key);
+        continue;
+      }
       const first = arr[0] || {};
-      const empty = Object.values(first).every(v => v === undefined || v === null || String(v).trim?.() === '');
+      const empty = Object.values(first).every((v) => v === undefined || v === null || String(v).trim?.() === '');
       if (empty) miss.push(key);
       continue;
     }
@@ -153,11 +214,17 @@ function computeMissing(requiredKeys = [], provided = {}) {
 
 // REGLAS DE RELLENO (Igual que en fill.js para doble seguridad)
 const PADDING_RULES = {
-  'product_key': 8,     'clave_producto': 8,
-  'zip': 5,             'cp': 5,            'codigo_postal': 5,
-  'payment_form': 2,    'forma_pago': 2,
-  'tax_system': 3,      'regimen_fiscal': 3,
-  'unit_key': 0,        'clave_unidad': 0
+  product_key: 8,
+  clave_producto: 8,
+  zip: 5,
+  cp: 5,
+  codigo_postal: 5,
+  payment_form: 2,
+  forma_pago: 2,
+  tax_system: 3,
+  regimen_fiscal: 3,
+  unit_key: 0,
+  clave_unidad: 0,
 };
 
 /**
@@ -182,9 +249,9 @@ function normalizeByContract(contract, provided) {
   for (const spec of plainSpecs) {
     if (!spec?.key) continue;
     const k = spec.key;
-    
+
     // 1. Primero intentamos reparar ceros si es clave SAT
-    let val = out[k];
+    const val = out[k];
     if (PADDING_RULES[k] !== undefined) {
       out[k] = applyPad(k, val);
     } else if (Object.prototype.hasOwnProperty.call(out, k)) {
@@ -200,9 +267,9 @@ function normalizeByContract(contract, provided) {
       const r = { ...(row || {}) };
       for (const spec of itemSpecs) {
         const rel = spec.key.replace(/^items\[\]\./, '');
-        
+
         // 1. Reparar ceros en items (ej. product_key)
-        let val = r[rel];
+        const val = r[rel];
         if (PADDING_RULES[rel] !== undefined) {
           r[rel] = applyPad(rel, val);
         } else if (Object.prototype.hasOwnProperty.call(r, rel)) {
@@ -219,17 +286,17 @@ function normalizeByContract(contract, provided) {
 function getFieldSpecs(contract, onlyItems = false) {
   const fields = Array.isArray(contract?.fields) ? contract.fields : [];
   return fields
-    .filter(f => {
+    .filter((f) => {
       const k = String(f?.key || '');
       const isItem = k.startsWith('items[].');
       return onlyItems ? isItem : !isItem;
     })
-    .map(f => ({ key: f.key, type: (f.type || 'text').toLowerCase() }));
+    .map((f) => ({ key: f.key, type: (f.type || 'text').toLowerCase() }));
 }
 
 function coerceValue(type, val) {
   const t = String(type || 'text').toLowerCase();
-  
+
   if (t === 'number' || t === 'int' || t === 'float') {
     if (typeof val === 'number') return val;
     if (val == null || val === '') return 0;
@@ -237,7 +304,7 @@ function coerceValue(type, val) {
     const n = Number(s);
     return Number.isFinite(n) ? n : 0;
   }
-  
+
   if (t === 'date') {
     if (!val) return null;
     if (val instanceof Date && !isNaN(val.valueOf())) {
@@ -252,7 +319,7 @@ function coerceValue(type, val) {
     if (iso) return String(val).slice(0, 10);
     return String(val);
   }
-  
+
   if (val === undefined || val === null) return '';
   return String(val);
 }
