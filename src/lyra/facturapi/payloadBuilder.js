@@ -23,6 +23,37 @@ const DEFAULT_ITEM_MAP = {
   unit_key: 'items[].product.unit_key',
 };
 
+// ✅ NUEVO (quirúrgico): campos NO permitidos por Facturapi en items/product
+const BLOCKED_ITEM_KEYS = new Set([
+  // errores que ya viste
+  'unit_name',
+  'tax_object',
+]);
+
+// ✅ NUEVO (quirúrgico): keys “raras” que llegan como literales (ej. "taxes[0].rate")
+const isBracketKey = (k) => /^\w+\[\d+\]\./.test(String(k || ''));
+
+// ✅ NUEVO (quirúrgico): borra unit_name/tax_object + cualquier "taxes[0].x" literal
+function sanitizeItemForFacturapi(destRow) {
+  if (!isObj(destRow)) return destRow;
+
+  // 1) root-level
+  for (const k of Object.keys(destRow)) {
+    if (BLOCKED_ITEM_KEYS.has(k)) delete destRow[k];
+    if (isBracketKey(k)) delete destRow[k]; // taxes[0].type, etc (llegan mal del "set")
+  }
+
+  // 2) product-level
+  if (isObj(destRow.product)) {
+    for (const k of Object.keys(destRow.product)) {
+      if (BLOCKED_ITEM_KEYS.has(k)) delete destRow.product[k];
+      if (isBracketKey(k)) delete destRow.product[k];
+    }
+  }
+
+  return destRow;
+}
+
 export function buildFacturaPayloadData({ contract, fields }) {
   const out = {};
 
@@ -100,9 +131,17 @@ export function buildFacturaPayloadData({ contract, fields }) {
       }
 
       // 4.2 copia cualquier campo no mapeado, sin pisar lo ya mapeado
+      // ✅ CAMBIO (quirúrgico): filtrar hard-block + no copiar keys bracket-style (taxes[0].x)
       for (const [k, v] of Object.entries(row || {})) {
         // si existe un destino mapeado (incluye product.*), NO lo dupliques al nivel raíz
         if (hasDestFor(effectiveItemMap, k)) continue;
+
+        // hard-block a nivel root
+        if (BLOCKED_ITEM_KEYS.has(k)) continue;
+
+        // evita que se cuelen llaves literales tipo taxes[0].rate
+        if (isBracketKey(k)) continue;
+
         if (getByPath(destRow, k) === undefined) destRow[k] = v;
       }
 
@@ -111,6 +150,9 @@ export function buildFacturaPayloadData({ contract, fields }) {
       delete destRow.price;
       delete destRow.product_key;
       delete destRow.unit_key;
+
+      // ✅ NUEVO (quirúrgico): limpieza final de item/product para Facturapi
+      sanitizeItemForFacturapi(destRow);
 
       arr.push(destRow);
     }
@@ -122,14 +164,11 @@ export function buildFacturaPayloadData({ contract, fields }) {
   const cp = getByPath(out, 'customer.address.zip');
   if (cp != null) setByPath(out, 'customer.address.zip', padZip(String(cp)));
 
-  // forma_pago → '03'
-  // (Esta normalización se mueve al punto 6.1)
-
   // moneda → upper
   const cur = getByPath(out, 'currency');
   if (cur != null) setByPath(out, 'currency', String(cur).toUpperCase());
 
-  // 2) Mayúsculas para payment_method (consistencia)
+  // payment_method → upper (consistencia)
   const pm = getByPath(out, 'payment_method');
   if (pm != null) setByPath(out, 'payment_method', String(pm).toUpperCase());
 
@@ -154,10 +193,10 @@ export function buildFacturaPayloadData({ contract, fields }) {
 
     // Orígenes válidos en orden de prioridad
     const pf = coalesce(
-      fields?.payment_form,                                   // si el usuario lo puso directo
-      getByPath(contract?.defaults, 'payment_form'),          // defaults del contrato
-      fields?.forma_pago,                                     // alias ES
-      getByPath(out, 'forma_pago')                            // si sobrevivió del passthrough
+      fields?.payment_form, // si el usuario lo puso directo
+      getByPath(contract?.defaults, 'payment_form'), // defaults del contrato
+      fields?.forma_pago, // alias ES
+      getByPath(out, 'forma_pago') // si sobrevivió del passthrough
     );
 
     if (pf != null && pf !== '') {
@@ -198,28 +237,27 @@ export function buildFacturaPayloadData({ contract, fields }) {
   // 2) Items
   if (Array.isArray(out.items)) {
     out.items = out.items.map((item) => {
+      // ✅ por seguridad, vuelve a sanitizar (por si contract.defaults metió cosas raras)
+      sanitizeItemForFacturapi(item);
+
       // qty
       if (item.quantity != null) item.quantity = normalizeNumber(item.quantity);
 
       // description
       const desc = getByPath(item, 'product.description');
-      if (desc)
-        setByPath(item, 'product.description', normalizeUpper(desc));
+      if (desc) setByPath(item, 'product.description', normalizeUpper(desc));
 
       // product_key
       const key = getByPath(item, 'product.product_key');
-      if (key)
-        setByPath(item, 'product.product_key', normalizeUpper(key));
+      if (key) setByPath(item, 'product.product_key', normalizeUpper(key));
 
       // unit_key
       const unit = getByPath(item, 'product.unit_key');
-      if (unit)
-        setByPath(item, 'product.unit_key', normalizeUpper(unit));
+      if (unit) setByPath(item, 'product.unit_key', normalizeUpper(unit));
 
       // price
       const price = getByPath(item, 'product.price');
-      if (price != null)
-        setByPath(item, 'product.price', normalizeNumber(price));
+      if (price != null) setByPath(item, 'product.price', normalizeNumber(price));
 
       return item;
     });
@@ -246,15 +284,20 @@ export function buildFacturaPayloadData({ contract, fields }) {
 }
 
 /* ===== Helpers ===== */
-function isObj(x) { return x && typeof x === 'object' && !Array.isArray(x); }
-function isStr(x) { return typeof x === 'string'; }
+function isObj(x) {
+  return x && typeof x === 'object' && !Array.isArray(x);
+}
+function isStr(x) {
+  return typeof x === 'string';
+}
 
 function hasDestFor(map = {}, key) {
   // detecta tanto items[].key como items[].algo.key (anidado: p.ej. product.description)
-  return Object.values(map || {}).some(dest =>
-    isStr(dest) &&
-    dest.startsWith('items[].') &&
-    (dest === `items[].${key}` || dest.endsWith(`.${key}`))
+  return Object.values(map || {}).some(
+    (dest) =>
+      isStr(dest) &&
+      dest.startsWith('items[].') &&
+      (dest === `items[].${key}` || dest.endsWith(`.${key}`))
   );
 }
 
@@ -303,7 +346,7 @@ function padZip(zip) {
 }
 
 function padPaymentForm(x) {
-  const s = x.trim();
+  const s = String(x ?? '').trim();
   return /^\d$/.test(s) ? `0${s}` : s;
 }
 
