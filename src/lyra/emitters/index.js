@@ -1,3 +1,4 @@
+// src/lyra/emitters/index.js
 import { z } from 'zod';
 import { registerTool } from '../../core/nlu/intentRouter.js';
 
@@ -12,13 +13,9 @@ const SelectInput = z
   });
 
 export function registerEmitterTools(contextFactory) {
-  /**
-   * Listar emitters del usuario (scope por org via X-Organization-Id en http client)
-   * GET /api/emitters  (ojo: baseURL ya incluye /api)
-   */
   registerTool('emitters.list', (inj) => {
     const ctx = (inj || contextFactory)();
-    return async (_input = {}) => {
+    return async () => {
       const { data } = await ctx.http.get('/emitters');
       const emitters = Array.isArray(data?.emitters) ? data.emitters : [];
       return {
@@ -29,10 +26,6 @@ export function registerEmitterTools(contextFactory) {
     };
   });
 
-  /**
-   * Seleccionar emisor actual para el flujo de factura
-   * NO pega al backend, solo persiste en sesión
-   */
   registerTool('emitters.select', (inj) => {
     const ctx = (inj || contextFactory)();
     return async (rawInput = {}) => {
@@ -41,40 +34,48 @@ export function registerEmitterTools(contextFactory) {
 
       const s = ctx.session || {};
       s.meta = s.meta || {};
+
+      // ✅ CANÓNICO (lo que ya lee facturapi/index.js y templates/contract.js)
+      s.meta.selectedEmitterId = emitter_id;
+
+      // ✅ COMPAT (por si algo viejo lo usa)
       s.meta.emitter_id = emitter_id;
+
+      // ya no estás esperando emisor
+      if (s.meta.awaitingEmitter) delete s.meta.awaitingEmitter;
 
       return {
         ok: true,
-        emitter_id: s.meta.emitter_id,
+        emitter_id,
+        selectedEmitterId: emitter_id,
         message: 'Emisor seleccionado',
       };
     };
   });
 
-  /**
-   * Ver emisor seleccionado (debug)
-   */
   registerTool('emitters.getSelected', (inj) => {
     const ctx = (inj || contextFactory)();
     return async () => {
       const s = ctx.session || {};
-      const emitter_id = s.meta?.emitter_id ?? null;
+      const selectedEmitterId =
+        s.meta?.selectedEmitterId ?? s.meta?.emitter_id ?? null;
+
       return {
         ok: true,
-        emitter_id,
+        emitter_id: selectedEmitterId,
+        selectedEmitterId,
       };
     };
   });
 
-  /**
-   * Reset emisor seleccionado
-   */
   registerTool('emitters.reset', (inj) => {
     const ctx = (inj || contextFactory)();
     return async () => {
       const s = ctx.session || {};
       if (!s.meta) s.meta = {};
+      delete s.meta.selectedEmitterId;
       delete s.meta.emitter_id;
+      delete s.meta.awaitingEmitter;
       return { ok: true };
     };
   });
