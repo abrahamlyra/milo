@@ -45,7 +45,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
   if (isObj(fields)) {
     for (const [k, v] of Object.entries(fields)) {
       if (k === 'items') continue;
-      if (effectiveMap[k]) continue; // si tiene destino mapeado, no lo pases plano
+      if (effectiveMap[k]) continue;
       out[k] = v;
     }
   }
@@ -58,18 +58,16 @@ export function buildFacturaPayloadData({ contract, fields }) {
     }
   }
 
-  // 3.1 Fallbacks críticos (por si no entraron por mapping)
-  // payment_form: intenta varias fuentes
+  // 3.1 Fallbacks críticos
   if (getByPath(out, 'payment_form') == null) {
     const fallbackPF =
       fields?.payment_form ??
       getByPath(contract?.defaults, 'payment_form') ??
       fields?.forma_pago ??
-      getByPath(out, 'forma_pago'); // por si sobrevivió del passthrough en algún flujo
+      getByPath(out, 'forma_pago');
     if (fallbackPF != null) setByPath(out, 'payment_form', fallbackPF);
   }
 
-  // payment_method (por simetría; opcional)
   if (getByPath(out, 'payment_method') == null) {
     const fallbackPM =
       fields?.payment_method ??
@@ -79,7 +77,6 @@ export function buildFacturaPayloadData({ contract, fields }) {
     if (fallbackPM != null) setByPath(out, 'payment_method', fallbackPM);
   }
 
-  // currency (por simetría)
   if (getByPath(out, 'currency') == null) {
     const fallbackCUR =
       fields?.currency ??
@@ -89,7 +86,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
     if (fallbackCUR != null) setByPath(out, 'currency', fallbackCUR);
   }
 
-  // 4) Items: usa DEFAULT_ITEM_MAP + contract.itemMappings
+  // 4) Items
   const hasItems = Array.isArray(fields?.items);
   const effectiveItemMap = { ...DEFAULT_ITEM_MAP, ...(isObj(contract?.itemMappings) ? contract.itemMappings : {}) };
 
@@ -97,8 +94,13 @@ export function buildFacturaPayloadData({ contract, fields }) {
     const arr = [];
 
     for (const rawRow of fields.items) {
-      // ✅ NUEVO (quirúrgico): rehidrata keys tipo "taxes[0].rate" a arrays reales
-      const row = normalizeRowBracketKeys(rawRow);
+      // ✅ SUPER-ANTI-PENDEJOS:
+      // rehidrata keys tipo:
+      //  - "product.description"
+      //  - "product.taxes[0].rate"
+      //  - "taxes[0].rate"
+      //  - "taxes[1].withholding"
+      const row = normalizeFlatItemKeys(rawRow);
 
       const destRow = {};
 
@@ -115,7 +117,6 @@ export function buildFacturaPayloadData({ contract, fields }) {
       }
 
       // 4.2 copia cualquier campo no mapeado, sin pisar lo ya mapeado
-      // ✅ CAMBIO: NO dejar pasar campos “problemáticos” al nivel raíz de item
       const ITEM_ROOT_BLOCKLIST = new Set([
         'unit_name',
         'tax_object',
@@ -123,12 +124,11 @@ export function buildFacturaPayloadData({ contract, fields }) {
         'tax_included',
         'objeto_imp',
         'taxes', // taxes debe vivir en product.taxes
+        'product', // product lo tratamos arriba
       ]);
 
       for (const [k, v] of Object.entries(row || {})) {
         if (ITEM_ROOT_BLOCKLIST.has(k)) continue;
-
-        // si existe un destino mapeado (incluye product.*), NO lo dupliques al nivel raíz
         if (hasDestFor(effectiveItemMap, k)) continue;
         if (getByPath(destRow, k) === undefined) destRow[k] = v;
       }
@@ -139,33 +139,28 @@ export function buildFacturaPayloadData({ contract, fields }) {
       delete destRow.product_key;
       delete destRow.unit_key;
 
-      // ✅ NUEVO (quirúrgico): Normaliza impuestos desde row.taxes (si existía) hacia product.taxes
-      // - Soporta formatos de CLI legacy:
-      //   taxes[i].tax = 002|001|003
-      //   taxes[i].type = transferred|withheld
-      //   taxes[i].rate = 0.16
-      // - Y también formato moderno:
-      //   taxes[i] = { type: 'IVA'|'ISR'|'IEPS', rate, withholding? }
+      // ✅ Taxes: soporta legacy y moderno, y asegura withholding correcto
       applyLegacyTaxesIntoProduct(destRow, row);
 
-      // ✅ NUEVO (quirúrgico): Normaliza ObjetoImp
-      // Acepta tax_object / taxability en row (aunque venga numérico)
-      const taxObj = row?.taxability ?? row?.tax_object ?? row?.objeto_imp;
+      // ✅ ObjetoImp
+      const taxObj = row?.taxability ?? row?.tax_object ?? row?.objeto_imp ?? getByPath(row, 'product.taxability');
       if (taxObj != null) {
         if (!isObj(destRow.product)) destRow.product = {};
         destRow.product.taxability = padTaxability(taxObj);
       }
 
-      // ✅ NUEVO: unit_name al lugar correcto (product.unit_name)
-      if (row?.unit_name != null) {
+      // ✅ unit_name al lugar correcto
+      const unitName = row?.unit_name ?? getByPath(row, 'product.unit_name');
+      if (unitName != null) {
         if (!isObj(destRow.product)) destRow.product = {};
-        destRow.product.unit_name = String(row.unit_name);
+        destRow.product.unit_name = String(unitName);
       }
 
-      // ✅ NUEVO: tax_included al lugar correcto
-      if (row?.tax_included != null) {
+      // ✅ tax_included boolean al lugar correcto
+      const taxIncluded = row?.tax_included ?? getByPath(row, 'product.tax_included');
+      if (taxIncluded != null) {
         if (!isObj(destRow.product)) destRow.product = {};
-        destRow.product.tax_included = normalizeBool(row.tax_included);
+        destRow.product.tax_included = normalizeBool(taxIncluded);
       }
 
       arr.push(destRow);
@@ -174,44 +169,38 @@ export function buildFacturaPayloadData({ contract, fields }) {
     out.items = arr;
   }
 
-  // 5) Normalizaciones finas para SAT/Facturapi
-  // CP 5 dígitos
+  // 5) Normalizaciones finas
   const cp = getByPath(out, 'customer.address.zip');
   if (cp != null) setByPath(out, 'customer.address.zip', padZip(String(cp)));
 
-  // moneda → upper
   const cur = getByPath(out, 'currency');
   if (cur != null) setByPath(out, 'currency', String(cur).toUpperCase());
 
-  // Mayúsculas para payment_method (consistencia)
   const pm = getByPath(out, 'payment_method');
   if (pm != null) setByPath(out, 'payment_method', String(pm).toUpperCase());
 
-  // type por defecto 'I'
   if (!getByPath(out, 'type')) setByPath(out, 'type', 'I');
 
-  // 6) Limpieza final: asegurar que no haya claves ES duplicadas en top-level
+  // 6) Limpieza final: quitar claves ES duplicadas
   for (const esKey of Object.keys(effectiveMap)) {
     if (!String(effectiveMap[esKey]).startsWith('items[]')) {
       if (esKey in out) delete out[esKey];
     }
   }
 
-  // 6.1) ENFORCER CRÍTICO: payment_form NUNCA debe faltar
+  // 6.1) payment_form NUNCA debe faltar
   (function enforcePaymentForm() {
     const already = getByPath(out, 'payment_form');
     if (already != null && already !== '') {
-      // Normaliza por si llegó '3' → '03'
       setByPath(out, 'payment_form', padPaymentForm(String(already)));
       return;
     }
 
-    // Orígenes válidos en orden de prioridad
     const pf = coalesce(
-      fields?.payment_form, // si el usuario lo puso directo
-      getByPath(contract?.defaults, 'payment_form'), // defaults del contrato
-      fields?.forma_pago, // alias ES
-      getByPath(out, 'forma_pago') // si sobrevivió del passthrough
+      fields?.payment_form,
+      getByPath(contract?.defaults, 'payment_form'),
+      fields?.forma_pago,
+      getByPath(out, 'forma_pago')
     );
 
     if (pf != null && pf !== '') {
@@ -223,23 +212,21 @@ export function buildFacturaPayloadData({ contract, fields }) {
    * 🔥 NORMALIZACIÓN CRÍTICA PARA FACTURAPI 🔥
    * ============================================ */
 
-  // helper para quitar acentos y mandar a upper
   const normalizeUpper = (str) => {
     if (typeof str !== 'string') return str;
     return str
       .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '') // quita acentos
+      .replace(/[\u0300-\u036f]/g, '')
       .toUpperCase()
-      .replace(/[^A-Z0-9 .,@#\-]/g, ''); // limpia caracteres invalidos SAT
+      .replace(/[^A-Z0-9 .,@#\-]/g, '');
   };
 
-  // helper número
   const normalizeNumber = (v) => {
     const n = Number(v);
-    return isNaN(n) ? v : n;
+    return Number.isNaN(n) ? v : n;
   };
 
-  // 1) CUSTOMER (receptor)
+  // CUSTOMER
   const legal = getByPath(out, 'customer.legal_name');
   if (legal) setByPath(out, 'customer.legal_name', normalizeUpper(legal));
 
@@ -249,41 +236,33 @@ export function buildFacturaPayloadData({ contract, fields }) {
   const email = getByPath(out, 'customer.email');
   if (email) setByPath(out, 'customer.email', String(email).toLowerCase());
 
-  // 2) Items
+  // Items
   if (Array.isArray(out.items)) {
     out.items = out.items.map((item) => {
-      // qty
       if (item.quantity != null) item.quantity = normalizeNumber(item.quantity);
 
-      // description
       const desc = getByPath(item, 'product.description');
       if (desc) setByPath(item, 'product.description', normalizeUpper(desc));
 
-      // product_key
       const key = getByPath(item, 'product.product_key');
       if (key) setByPath(item, 'product.product_key', normalizeUpper(key));
 
-      // unit_key
       const unit = getByPath(item, 'product.unit_key');
       if (unit) setByPath(item, 'product.unit_key', normalizeUpper(unit));
 
-      // unit_name (no upper agresivo; solo string)
       const uname = getByPath(item, 'product.unit_name');
       if (uname != null) setByPath(item, 'product.unit_name', String(uname));
 
-      // taxability debe ser "01".."08" como string (ObjetoImp)
       const taxability = getByPath(item, 'product.taxability');
       if (taxability != null) setByPath(item, 'product.taxability', padTaxability(taxability));
 
-      // tax_included boolean
       const ti = getByPath(item, 'product.tax_included');
       if (ti != null) setByPath(item, 'product.tax_included', normalizeBool(ti));
 
-      // price
       const price = getByPath(item, 'product.price');
       if (price != null) setByPath(item, 'product.price', normalizeNumber(price));
 
-      // taxes: asegurar números
+      // taxes
       const taxes = getByPath(item, 'product.taxes');
       if (Array.isArray(taxes)) {
         setByPath(
@@ -297,12 +276,14 @@ export function buildFacturaPayloadData({ contract, fields }) {
               if (tt.rate != null) tt.rate = normalizeNumber(tt.rate);
               if (tt.withholding != null) tt.withholding = normalizeBool(tt.withholding);
 
-              // type en upper (IVA/ISR/IEPS)
               if (tt.type != null) tt.type = normalizeUpper(String(tt.type));
 
-              // elimina ruido legacy si quedó
+              // limpia ruido legacy
               delete tt.factor;
               delete tt.tax;
+              delete tt.tax_code;
+              delete tt.taxType;
+              delete tt.impuesto;
 
               return tt;
             })
@@ -314,7 +295,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
     });
   }
 
-  // 3) Campos CFDI altos
+  // CFDI altos
   const pf = getByPath(out, 'payment_form');
   if (pf) setByPath(out, 'payment_form', padPaymentForm(String(pf)));
 
@@ -327,7 +308,6 @@ export function buildFacturaPayloadData({ contract, fields }) {
   const cur2 = getByPath(out, 'currency');
   if (cur2) setByPath(out, 'currency', normalizeUpper(String(cur2)));
 
-  // tipo
   const tipo = getByPath(out, 'type');
   if (tipo) setByPath(out, 'type', normalizeUpper(String(tipo)));
 
@@ -343,8 +323,9 @@ function isStr(x) {
 }
 
 function hasDestFor(map = {}, key) {
-  // detecta tanto items[].key como items[].algo.key (anidado: p.ej. product.description)
-  return Object.values(map || {}).some((dest) => isStr(dest) && dest.startsWith('items[].') && (dest === `items[].${key}` || dest.endsWith(`.${key}`)));
+  return Object.values(map || {}).some(
+    (dest) => isStr(dest) && dest.startsWith('items[].') && (dest === `items[].${key}` || dest.endsWith(`.${key}`))
+  );
 }
 
 function getByPath(obj, path) {
@@ -410,59 +391,112 @@ function normalizeBool(v) {
 }
 
 function padTaxability(v) {
-  // Facturapi usa strings "01".."08" (ObjetoImp)
   const s = String(v).trim();
-  // si viene "2" -> "02"
   if (/^\d$/.test(s)) return `0${s}`;
-  // si viene 02 ya ok
   if (/^\d{2}$/.test(s)) return s;
-  // si viene "02" como number 2 -> arriba ya lo hizo
   return s;
 }
 
-function normalizeRowBracketKeys(raw) {
-  // Convierte keys tipo:
-  //  - "taxes[0].rate" -> row.taxes[0].rate
-  //  - "taxes[1].tax"  -> row.taxes[1].tax
-  // Mantiene lo demás igual.
-  const row = isObj(raw) ? { ...raw } : raw;
-  if (!isObj(row)) return row;
-
-  const taxes = Array.isArray(row.taxes) ? row.taxes.slice() : null;
+/**
+ * ✅ SUPER-ANTI-PENDEJOS:
+ * Convierte keys planas con dots/brackets a estructura real.
+ * Ej:
+ *  - "product.description" -> { product: { description } }
+ *  - "product.taxes[1].withholding" -> { product: { taxes: [ , { withholding:true } ] } }
+ *  - "taxes[0].rate" -> { taxes: [ { rate } ] }
+ */
+function normalizeFlatItemKeys(raw) {
+  if (!isObj(raw)) return raw;
+  const row = { ...raw };
 
   for (const k of Object.keys(row)) {
-    const m = /^taxes\[(\d+)\]\.(.+)$/.exec(k);
-    if (!m) continue;
+    if (!k) continue;
+    const looksNested = k.includes('.') || k.includes('[');
+    if (!looksNested) continue;
 
-    const idx = parseInt(m[1], 10);
-    const prop = m[2];
+    // Solo normalizamos si es patrón razonable (evita llaves raras)
+    if (!/^[a-zA-Z0-9_.\[\]]+$/.test(k)) continue;
 
-    if (!Number.isFinite(idx) || idx < 0) continue;
-
-    const arr = taxes || [];
-    while (arr.length <= idx) arr.push({});
-    if (!isObj(arr[idx])) arr[idx] = {};
-    arr[idx][prop] = row[k];
+    const value = row[k];
+    setByPathWithBrackets(row, k, value);
     delete row[k];
-
-    // asigna de vuelta
-    row.taxes = arr;
   }
 
   return row;
 }
 
+/**
+ * Set con soporte de arrays tipo taxes[0]
+ * path admite dots y brackets.
+ */
+function setByPathWithBrackets(obj, path, value) {
+  if (!isObj(obj) || !isStr(path) || !path) return obj;
+
+  const tokens = tokenizePath(path);
+  if (!tokens.length) return obj;
+
+  let ref = obj;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const last = i === tokens.length - 1;
+
+    if (t.type === 'prop') {
+      if (last) {
+        ref[t.key] = value;
+      } else {
+        const next = tokens[i + 1];
+        if (next && next.type === 'index') {
+          if (!Array.isArray(ref[t.key])) ref[t.key] = [];
+        } else {
+          if (!isObj(ref[t.key])) ref[t.key] = {};
+        }
+        ref = ref[t.key];
+      }
+    } else if (t.type === 'index') {
+      if (!Array.isArray(ref)) {
+        // si ref no es array, no podemos indexar: aborta sin romper todo
+        return obj;
+      }
+      while (ref.length <= t.idx) ref.push(undefined);
+
+      if (last) {
+        ref[t.idx] = value;
+      } else {
+        if (!isObj(ref[t.idx])) ref[t.idx] = {};
+        ref = ref[t.idx];
+      }
+    }
+  }
+
+  return obj;
+}
+
+function tokenizePath(path) {
+  // Convierte "product.taxes[1].withholding" en:
+  // [{prop:'product'},{prop:'taxes'},{index:1},{prop:'withholding'}]
+  const out = [];
+  const re = /([^. \[\]]+)|\[(\d+)\]/g;
+  let m;
+  while ((m = re.exec(path))) {
+    if (m[1]) out.push({ type: 'prop', key: m[1] });
+    else out.push({ type: 'index', idx: parseInt(m[2], 10) });
+  }
+  return out.filter((t) => (t.type === 'prop' ? !!t.key : Number.isFinite(t.idx)));
+}
+
 function applyLegacyTaxesIntoProduct(destRow, row) {
-  // Si row ya trae product.taxes (bien), no tocamos.
-  // Si trae row.taxes (legacy), lo convertimos a product.taxes.
   const prod = isObj(destRow.product) ? destRow.product : {};
 
+  // Si ya vienen bien definidos en product.taxes, solo normaliza tipos básicos
   if (Array.isArray(prod.taxes) && prod.taxes.length) {
+    prod.taxes = normalizeTaxesArray(prod.taxes);
     destRow.product = prod;
     return;
   }
 
-  const legacy = Array.isArray(row?.taxes) ? row.taxes : null;
+  // legacy: puede venir en row.taxes o en row.product.taxes
+  const legacy = Array.isArray(row?.taxes) ? row.taxes : Array.isArray(row?.product?.taxes) ? row.product.taxes : null;
+
   if (!legacy || !legacy.length) {
     destRow.product = prod;
     return;
@@ -473,32 +507,44 @@ function applyLegacyTaxesIntoProduct(destRow, row) {
     if (s === '002' || s === '2') return 'IVA';
     if (s === '001' || s === '1') return 'ISR';
     if (s === '003' || s === '3') return 'IEPS';
-    return s; // por si ya venía 'IVA'
+    return s;
   };
 
-  const out = legacy
+  const outTaxes = legacy
     .map((t) => {
       if (!isObj(t)) return null;
 
-      // legacy: t.type = transferred|withheld
-      const legacyKind = String(t.type || '').trim().toLowerCase();
-      const withholding = t.withholding === true || legacyKind === 'withheld';
+      const legacyKind = String(t.kind ?? t.type ?? '').trim().toLowerCase();
+      const withholding = normalizeBool(t.withholding ?? (legacyKind === 'withheld'));
 
-      // legacy: t.tax = 002/001/003  OR  t.type ya puede venir IVA/ISR
-      const type = mapTaxCodeToType(t.tax != null ? t.tax : t.tax_code != null ? t.tax_code : t.taxType != null ? t.taxType : t.impuesto != null ? t.impuesto : t.type);
+      // si viene tax=002/001/003 úsalo, si no, usa impuesto/taxType/type (si ya es IVA/ISR)
+      const rawTax =
+        t.tax != null
+          ? t.tax
+          : t.tax_code != null
+            ? t.tax_code
+            : t.taxType != null
+              ? t.taxType
+              : t.impuesto != null
+                ? t.impuesto
+                : t.tax_name != null
+                  ? t.tax_name
+                  : t.type;
 
-      // rate num
+      const type = mapTaxCodeToType(rawTax);
+
       const rate = t.rate != null ? Number(t.rate) : null;
       if (rate == null || Number.isNaN(rate)) return null;
 
       const obj = { type: String(type).toUpperCase(), rate };
       if (withholding) obj.withholding = true;
+
       return obj;
     })
     .filter(Boolean);
 
-  if (out.length) {
-    prod.taxes = out;
+  if (outTaxes.length) {
+    prod.taxes = normalizeTaxesArray(outTaxes);
     destRow.product = prod;
   } else {
     destRow.product = prod;
@@ -506,4 +552,30 @@ function applyLegacyTaxesIntoProduct(destRow, row) {
 
   // nunca mandar taxes al nivel item
   if ('taxes' in destRow) delete destRow.taxes;
+}
+
+function normalizeTaxesArray(taxes) {
+  if (!Array.isArray(taxes)) return taxes;
+  return taxes
+    .map((t) => {
+      if (!isObj(t)) return null;
+      const tt = { ...t };
+
+      if (tt.rate != null) tt.rate = Number(tt.rate);
+      if (Number.isNaN(tt.rate)) return null;
+
+      if (tt.withholding != null) tt.withholding = normalizeBool(tt.withholding);
+
+      if (tt.type != null) tt.type = String(tt.type).trim().toUpperCase();
+
+      delete tt.factor;
+      delete tt.tax;
+      delete tt.tax_code;
+      delete tt.taxType;
+      delete tt.impuesto;
+      delete tt.kind;
+
+      return tt;
+    })
+    .filter(Boolean);
 }
