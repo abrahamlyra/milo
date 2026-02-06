@@ -3,19 +3,34 @@ import { registerTool } from '../../core/nlu/intentRouter.js';
 import { normalizeRFC, normalizeRazonSocial } from '../../core/utils/normalize.js';
 import { resolveEnum } from '../catalogs/resolve.js';
 
-// 🛡️ MAPA DE REGLAS DE RELLENO (PADDING)
-// Si llega un número o un string corto, lo forzamos a su longitud correcta con ceros a la izquierda.
+// 🛡️ PADDING RULES
+// If an input arrives as number or short string, enforce left-zero padding to expected length.
 const PADDING_RULES = {
-  // ClaveProdServ del SAT siempre son 8 dígitos
-  'product_key': 8,     'clave_producto': 8,
-  // CP siempre son 5 dígitos
-  'zip': 5,             'cp': 5,            'codigo_postal': 5,
-  // Forma de pago siempre 2 dígitos
-  'payment_form': 2,    'forma_pago': 2,
-  // Regímenes fiscales suelen ser 3 dígitos
-  'tax_system': 3,      'regimen_fiscal': 3,
-  // Unidades (E48, H87) no llevan padding numérico, pero las protegemos del cast
-  'unit_key': 0,        'clave_unidad': 0
+  // SAT product key is always 8 digits
+  product_key: 8,
+  clave_producto: 8,
+
+  // ZIP/CP always 5 digits
+  zip: 5,
+  cp: 5,
+  codigo_postal: 5,
+
+  // Payment form always 2 digits
+  payment_form: 2,
+  forma_pago: 2,
+
+  // Tax system usually 3 digits
+  tax_system: 3,
+  regimen_fiscal: 3,
+
+  // ObjetoImp / taxability is typically 2 digits (01/02/03...)
+  taxability: 2,
+  tax_object: 2,
+  objeto_imp: 2,
+
+  // Unit keys (E48, H87) must stay as string (no numeric padding)
+  unit_key: 0,
+  clave_unidad: 0,
 };
 
 function getCtxState(ctx) {
@@ -23,16 +38,108 @@ function getCtxState(ctx) {
   const tid = s.selectedTemplateId;
   if (!tid) throw new Error('No hay plantilla seleccionada. Usa: usar <templateId>');
 
-  // Tolera ambos layouts
+  // tolerate both layouts
   const contract = s.contracts?.[tid] ?? s.contract ?? null;
   if (!contract) throw new Error('Contract no cargado para esta plantilla.');
 
   const provided =
-    (s.provided && s.provided[tid]) ? s.provided[tid]
-    : (s.provided && !Array.isArray(s.provided) && typeof s.provided === 'object' && !s.provided[tid]) ? s.provided
-    : {};
+    s.provided && s.provided[tid]
+      ? s.provided[tid]
+      : s.provided && !Array.isArray(s.provided) && typeof s.provided === 'object' && !s.provided[tid]
+        ? s.provided
+        : {};
 
   return { tid, s, contract, provided };
+}
+
+/**
+ * Mixed getter:
+ * supports:
+ *  - "product.description"
+ *  - "product.taxes[0].withholding"
+ */
+function getByPathWithBrackets(obj, path) {
+  if (!obj || typeof obj !== 'object') return undefined;
+  if (!path || typeof path !== 'string') return undefined;
+
+  const tokens = tokenizePath(path);
+  if (!tokens.length) return undefined;
+
+  let ref = obj;
+  for (const t of tokens) {
+    if (t.type === 'prop') {
+      if (!ref || typeof ref !== 'object') return undefined;
+      ref = ref[t.key];
+    } else if (t.type === 'index') {
+      if (!Array.isArray(ref)) return undefined;
+      ref = ref[t.idx];
+    }
+  }
+  return ref;
+}
+
+/**
+ * Mixed setter:
+ * supports:
+ *  - "product.description"
+ *  - "product.taxes[0].withholding"
+ */
+function setByPathWithBrackets(obj, path, value) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (!path || typeof path !== 'string') return obj;
+
+  const tokens = tokenizePath(path);
+  if (!tokens.length) return obj;
+
+  let ref = obj;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    const last = i === tokens.length - 1;
+
+    if (t.type === 'prop') {
+      if (last) {
+        ref[t.key] = value;
+        return obj;
+      }
+
+      const next = tokens[i + 1];
+      if (next && next.type === 'index') {
+        if (!Array.isArray(ref[t.key])) ref[t.key] = [];
+      } else {
+        if (!ref[t.key] || typeof ref[t.key] !== 'object' || Array.isArray(ref[t.key])) ref[t.key] = {};
+      }
+      ref = ref[t.key];
+    } else if (t.type === 'index') {
+      if (!Array.isArray(ref)) {
+        // cannot index into a non-array, abort safely
+        return obj;
+      }
+      while (ref.length <= t.idx) ref.push(undefined);
+
+      if (last) {
+        ref[t.idx] = value;
+        return obj;
+      }
+
+      if (!ref[t.idx] || typeof ref[t.idx] !== 'object' || Array.isArray(ref[t.idx])) ref[t.idx] = {};
+      ref = ref[t.idx];
+    }
+  }
+
+  return obj;
+}
+
+function tokenizePath(path) {
+  // "product.taxes[1].withholding" =>
+  // [{prop:'product'},{prop:'taxes'},{index:1},{prop:'withholding'}]
+  const out = [];
+  const re = /([^. \[\]]+)|\[(\d+)\]/g;
+  let m;
+  while ((m = re.exec(path))) {
+    if (m[1]) out.push({ type: 'prop', key: m[1] });
+    else out.push({ type: 'index', idx: parseInt(m[2], 10) });
+  }
+  return out.filter((t) => (t.type === 'prop' ? !!t.key : Number.isFinite(t.idx)));
 }
 
 function computeMissing(contract, provided) {
@@ -45,8 +152,15 @@ function computeMissing(contract, provided) {
     if (f.key?.startsWith?.('items[].')) {
       const k = f.key.replace('items[].', '');
       const items = Array.isArray(provided.items) ? provided.items : [];
+
       const hasAtLeastOne =
-        items.length > 0 && items.some((row) => row && row[k] !== undefined && row[k] !== '');
+        items.length > 0 &&
+        items.some((row) => {
+          if (!row || typeof row !== 'object') return false;
+          const v = (k.includes('.') || k.includes('[')) ? getByPathWithBrackets(row, k) : row[k];
+          return v !== undefined && v !== null && v !== '';
+        });
+
       if (!hasAtLeastOne) missing.push(f.key);
       continue;
     }
@@ -56,21 +170,23 @@ function computeMissing(contract, provided) {
       missing.push(f.key);
     }
   }
+
   return missing;
 }
 
 function applyNormalizers(key, value) {
   if (key === 'receptor_rfc') return normalizeRFC(value);
-  // OJO: Si normalizeRazonSocial es muy agresivo, podría estar quitando apellidos.
-  // Por seguridad, si el valor ya viene con espacios, confiamos en él.
+
+  // If normalizeRazonSocial is too aggressive, keep spacing name as-is and only uppercase
   if (key === 'receptor_razon') {
-    if (value && value.includes(' ')) return value.toUpperCase(); 
+    if (value && value.includes(' ')) return String(value).toUpperCase();
     return normalizeRazonSocial(value);
   }
+
   return value;
 }
 
-// ===== Helpers de entrega =====
+// ===== Delivery helpers =====
 const DELIVERY_MODES = new Set(['none', 'email', 'sms', 'both']);
 
 function coerceMode(val) {
@@ -95,62 +211,57 @@ function setDeep(target, dottedKey, value) {
 }
 
 /**
- * Aplica reglas de padding para recuperar ceros perdidos.
- * Ej: entrada 1010101 (number) -> salida "01010101" (string)
+ * Apply padding rules to recover lost zeros.
+ * Example: 1010101 -> "01010101"
  */
 function enforcePadding(key, val) {
-  // Limpia la llave de items[]. para buscar en las reglas
-  const cleanKey = key.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
-  
-  // Si no hay regla para esta llave, devuelve el valor tal cual (casteado si es necesario)
-  if (!Object.prototype.hasOwnProperty.call(PADDING_RULES, cleanKey)) {
-    return val;
-  }
+  const rawKey = String(key || '');
+
+  // remove items[] / items[idx] prefix
+  let cleanKey = rawKey.replace(/^items\[\d*\]\./, '').replace(/^items\[\]\./, '');
+
+  // if key is nested like "product.product_key", rule targets last segment
+  if (cleanKey.includes('.')) cleanKey = cleanKey.split('.').pop();
+
+  if (!Object.prototype.hasOwnProperty.call(PADDING_RULES, cleanKey)) return val;
 
   const targetLen = PADDING_RULES[cleanKey];
-  let strVal = String(val ?? '');
+  const strVal = String(val ?? '');
 
-  // Caso especial: Si es unit_key (E48) no rellenamos con ceros, solo aseguramos string
+  // "unit_key" etc: keep string only
   if (targetLen === 0) return strVal;
 
-  // Relleno mágico
   return strVal.trim().padStart(targetLen, '0');
 }
 
 function parseRawKV(raw) {
   const out = {};
-  // MEJORA DE REGEX: Intenta capturar valores sin comillas hasta encontrar el siguiente "key="
-  // Grupo 1: key
-  // Grupo 2: valor comillas dobles
-  // Grupo 3: valor comillas simples
-  // Grupo 4: valor sin comillas (consume hasta ver un espacio seguido de algo= o el final)
+  // Capture: key="value" | key='value' | key=value (until next key=)
   const re = /([\w.\[\]]+)=(?:"([^"]*)"|'([^']*)'|((?:(?!\s+[\w.\[\]]+=).)*))/g;
-  
+
   let r;
   while ((r = re.exec(raw)) !== null) {
     const key = r[1];
-    // Prioridad: comillas dobles > simples > sin comillas
-    const rawVal = r[2] ?? r[3] ?? r[4]; 
-
+    const rawVal = r[2] ?? r[3] ?? r[4];
     if (rawVal === undefined) continue;
 
-    // Limpiamos espacios extra si venía sin comillas
     const valTrimmed = rawVal.trim();
 
-    // 1. Aplicar Padding si es clave SAT
+    // 1) Padding first
     const padded = enforcePadding(key, valTrimmed);
 
-    // 2. Si fue modificado por padding, úsalo. Si no, intenta cast numérico/booleano
+    // 2) If padding changed, keep as string; else attempt cast
     if (padded !== valTrimmed) {
       out[key] = padded;
     } else {
       const cast =
         /^[0-9]+(\.[0-9]+)?$/.test(padded) ? Number(padded)
-        : /^(true|false)$/i.test(padded) ? /^true$/i.test(padded)
-        : padded;
+          : /^(true|false)$/i.test(padded) ? /^true$/i.test(padded)
+            : padded;
       out[key] = cast;
     }
   }
+
   return out;
 }
 
@@ -184,25 +295,28 @@ export function registerFillTools(contextFactory) {
         if (key.startsWith('items[].')) {
           const k = key.replace('items[].', '');
           payload.items = payload.items || [{}];
-          
-          // Sugerencia inteligente para claves SAT
-          if (Object.prototype.hasOwnProperty.call(PADDING_RULES, k)) {
-            // Ejemplo genérico con ceros correctos
-            if (k.includes('product')) payload.items[0][k] = '01010101';
-            else if (k.includes('unit')) payload.items[0][k] = 'E48';
-            else payload.items[0][k] = '00';
+
+          // Smart suggestion for SAT keys
+          const leaf = k.includes('.') ? k.split('.').pop() : k;
+          if (Object.prototype.hasOwnProperty.call(PADDING_RULES, leaf)) {
+            if (leaf.includes('product')) payload.items[0][leaf] = '01010101';
+            else if (leaf.includes('unit')) payload.items[0][leaf] = 'E48';
+            else if (leaf.includes('taxability') || leaf.includes('objeto')) payload.items[0][leaf] = '02';
+            else payload.items[0][leaf] = '00';
             return;
           }
 
-          const kind = (f?.type || (/price|importe|monto|cantidad|qty|quantity/i.test(k) ? 'number' : 'string')).toLowerCase();
+          const kind = String(
+            f?.type || (/price|importe|monto|cantidad|qty|quantity/i.test(k) ? 'number' : 'string')
+          ).toLowerCase();
+
           payload.items[0][k] =
             (kind === 'number' || kind === 'money') ? 1
-            : /description|concepto|desc/i.test(k) ? 'Servicio'
-            : 'Valor';
+              : /description|concepto|desc/i.test(k) ? 'Servicio'
+                : 'Valor';
           return;
         }
 
-        // ... resto de lógica suggest ...
         if ((f?.type === 'enum' || f?.optionsRef) && f?.optionsRef) {
           const enumHit = resolveEnum(catalogs, f.optionsRef, null);
           if (enumHit != null) {
@@ -210,23 +324,24 @@ export function registerFillTools(contextFactory) {
             return;
           }
         }
+
         if (f?.default !== undefined) { payload[key] = f.default; return; }
-        
+
         const t = String(f?.type || '').toLowerCase();
         if (t === 'email') { payload[key] = 'cliente@dominio.com'; return; }
-        if (t === 'rfc')   { payload[key] = 'XAXX010101000'; return; }
-        if (t === 'date')  { payload[key] = new Date().toISOString().slice(0,10); return; }
-        if (t === 'number'){ payload[key] = 1; return; }
-        
+        if (t === 'rfc') { payload[key] = 'XAXX010101000'; return; }
+        if (t === 'date') { payload[key] = new Date().toISOString().slice(0, 10); return; }
+        if (t === 'number') { payload[key] = 1; return; }
+
         const k = key.toLowerCase();
         if (/razon|nombre/.test(k)) { payload[key] = 'ACME S.A. DE C.V.'; return; }
         payload[key] = 'Valor';
       };
 
-      const take = (mode === 'full') ? fields : fields.filter(f => f?.required);
+      const take = (mode === 'full') ? fields : fields.filter((f) => f?.required);
       for (const f of take) propose(f);
       if (Object.keys(payload).length === 0) {
-        for (const f of fields.filter(x => x?.required)) propose(f);
+        for (const f of fields.filter((x) => x?.required)) propose(f);
       }
 
       s.lastSuggestion = s.lastSuggestion || {};
@@ -258,6 +373,7 @@ export function registerFillTools(contextFactory) {
         if (k === 'items') continue;
         target[k] = applyNormalizers(k, v);
       }
+
       if (Array.isArray(target.items)) {
         target.items = target.items.map((row) => {
           const out = { ...(row || {}) };
@@ -274,7 +390,10 @@ export function registerFillTools(contextFactory) {
   });
 
   /* =========================
-    SET (Corregido para Names con espacios y Ceros perdidos)
+    SET (fixed to support:
+      - values with spaces in __raw
+      - recovered zeros
+      - nested item paths (dots/brackets)
   ========================= */
   registerTool('fill.set', async () => {
     const ctx = contextFactory();
@@ -284,14 +403,11 @@ export function registerFillTools(contextFactory) {
 
       for (const [k, v] of Object.entries(input || {})) {
         if (k !== '__raw') {
-          // APLICAR RELLENO INCLUSO SI VIENE DIRECTO DEL NLU (JSON)
-          // Esto recupera el "01010101" si el NLU mandó el número 1010101
           kv[k] = enforcePadding(k, v);
           continue;
         }
-        
+
         if (typeof v === 'string') {
-          // Usamos la nueva regex más inteligente dentro de parseRawKV
           const parsed = parseRawKV(v);
           Object.assign(kv, parsed);
         }
@@ -300,31 +416,45 @@ export function registerFillTools(contextFactory) {
       const target = { ...provided };
 
       for (const [key, val] of Object.entries(kv)) {
-        // Normaliza (Nombre, RFC)
+        // normalizers are only for top-level known keys (RFC/razon)
+        // for nested item keys we keep it as-is unless it's a known top-level field.
         const cleanKey = key.replace(/^items\[(\d+)\]\./, '').replace(/^items\[\]\./, '');
         const normalized = applyNormalizers(cleanKey, val);
 
-        // Caso A: items[<idx>].campo
+        // Case A: items[<idx>].<path>
         const mIndexed = key.match(/^items\[(\d+)\]\.(.+)$/);
         if (mIndexed) {
           const idx = Number(mIndexed[1]);
-          const k   = mIndexed[2];
+          const path = mIndexed[2];
+
           target.items = Array.isArray(target.items) ? target.items : [];
           while (target.items.length <= idx) target.items.push({});
-          target.items[idx] = { ...(target.items[idx] || {}), [k]: normalized };
+          target.items[idx] = target.items[idx] || {};
+
+          if (path.includes('.') || path.includes('[')) {
+            setByPathWithBrackets(target.items[idx], path, normalized);
+          } else {
+            target.items[idx][path] = normalized;
+          }
           continue;
         }
 
-        // Caso B: items[].campo
+        // Case B: items[].<path> (default idx 0)
         if (key.startsWith('items[].')) {
-          const k = key.replace('items[].', '');
+          const path = key.replace('items[].', '');
+
           target.items = Array.isArray(target.items) ? target.items : [];
           target.items[0] = target.items[0] || {};
-          target.items[0][k] = normalized;
+
+          if (path.includes('.') || path.includes('[')) {
+            setByPathWithBrackets(target.items[0], path, normalized);
+          } else {
+            target.items[0][path] = normalized;
+          }
           continue;
         }
 
-        // Caso C: planos
+        // Case C: plain top-level fields
         target[key] = normalized;
       }
 
