@@ -18,6 +18,16 @@ export function createContextFactory(getCurrentReq) {
     // ✅ Multi-tenant
     const orgId = norm(body?.context?.orgId);
 
+    // ✅ Deterministic state (from FE)
+    const selectedEmitterId = norm(body?.context?.selectedEmitterId || body?.context?.emitterId);
+    const selectedTemplateId = norm(body?.context?.selectedTemplateId || body?.context?.templateId);
+
+    const session = getSession(sessionId);
+
+    // ✅ Hydrate session meta every request (stateless across Cloud Run instances)
+    if (selectedEmitterId) session.meta.selectedEmitterId = selectedEmitterId;
+    if (selectedTemplateId) session.meta.selectedTemplateId = selectedTemplateId;
+
     const http = makeClient({
       baseURL: config.lyraApiUrl, // ya incluye /api
       timeoutMs: config.httpTimeoutMs,
@@ -39,7 +49,7 @@ export function createContextFactory(getCurrentReq) {
       http,
       setToken: (t) => (tokenCache = t),
       getToken: () => tokenCache || token,
-      session: getSession(sessionId),
+      session,
       req,
       orgId, // opcional debug
     };
