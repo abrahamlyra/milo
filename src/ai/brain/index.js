@@ -399,13 +399,17 @@ export async function runMiloBrain({
 
       // ✅ Si la plantilla es factura, inmediatamente listamos emisores
       if (isInvoiceTypeFromContract(toolResult)) {
-        const emitAction = 'emitters.list';
-        const emitResult = await callMiloAction({
-          action: emitAction,
-          input: {},
-          contextFactory,
-          rawReq: rawPayload,
-        });
+        let emitResult = null;
+        try {
+          emitResult = await callMiloAction({
+            action: 'emitters.list',
+            input: {},
+            contextFactory,
+            rawReq: rawPayload,
+          });
+        } catch (emitErr) {
+          console.warn('[Milo][Brain] emitters.list falló en fast-path:', emitErr?.message);
+        }
 
         const contractReply = await buildReplyFromTool({
           openai,
@@ -416,7 +420,10 @@ export async function runMiloBrain({
           toolResult,
         });
 
-        const emitReply = formatEmittersListForUser(emitResult || {});
+        const emitReply = emitResult
+          ? formatEmittersListForUser(emitResult)
+          : 'No pude cargar los emisores. Usa el comando "emisores" para verlos.';
+
         const replyText = [
           typeof contractReply === 'string'
             ? contractReply
@@ -436,7 +443,7 @@ export async function runMiloBrain({
         return {
           ok: true,
           reply: replyText,
-          usedTools: [action, emitAction],
+          usedTools: [action, 'emitters.list'],
           rawToolResult: toolResult,
         };
       }
@@ -535,22 +542,35 @@ export async function runMiloBrain({
       }
     }
 
-    const toolResult = await callMiloAction({
-      action,
-      input,
-      contextFactory,
-      rawReq: rawPayload,
-    });
-
-    // ✅ Si acaban de seleccionar contrato de factura, inmediatamente listamos emisores
-    if (action === 'templates.contract' && isInvoiceTypeFromContract(toolResult)) {
-      const emitAction = 'emitters.list';
-      const emitResult = await callMiloAction({
-        action: emitAction,
-        input: {},
+    // 3.3 Ejecutar tool con fallback a chat si falla
+    let toolResult;
+    try {
+      toolResult = await callMiloAction({
+        action,
+        input,
         contextFactory,
         rawReq: rawPayload,
       });
+    } catch (toolErr) {
+      console.warn('[Milo][Brain] Tool falló, cayendo a chat:', action, toolErr?.message);
+      const reply = await runChatOnly({ openai, history, message });
+      saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+      return { ok: true, reply, usedTools: [] };
+    }
+
+    // ✅ Si acaban de seleccionar contrato de factura, inmediatamente listamos emisores
+    if (action === 'templates.contract' && isInvoiceTypeFromContract(toolResult)) {
+      let emitResult = null;
+      try {
+        emitResult = await callMiloAction({
+          action: 'emitters.list',
+          input: {},
+          contextFactory,
+          rawReq: rawPayload,
+        });
+      } catch (emitErr) {
+        console.warn('[Milo][Brain] emitters.list falló tras contract:', emitErr?.message);
+      }
 
       const builtContract = await buildReplyFromTool({
         openai,
@@ -561,7 +581,10 @@ export async function runMiloBrain({
         toolResult,
       });
 
-      const emitReply = formatEmittersListForUser(emitResult || {});
+      const emitReply = emitResult
+        ? formatEmittersListForUser(emitResult)
+        : 'No pude cargar los emisores. Usa el comando "emisores" para verlos.';
+
       const replyText = [
         typeof builtContract === 'string' ? builtContract : builtContract?.reply || '',
         '',
@@ -579,7 +602,7 @@ export async function runMiloBrain({
       return {
         ok: true,
         reply: replyText,
-        usedTools: [action, emitAction],
+        usedTools: [action, 'emitters.list'],
         rawToolResult: toolResult,
       };
     }

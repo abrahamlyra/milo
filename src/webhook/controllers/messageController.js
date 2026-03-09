@@ -88,7 +88,7 @@ export function makeMessageController(contextFactory) {
 
       // 🧠 NUEVO BLOQUE:
       // Si NO hay acción explícita, delegamos al cerebro LLM de Milo.
-      // Si el LLM falla por cualquier razón, hacemos fallback al mensaje de ayuda clásico.
+      // Si el LLM falla por cualquier razón, respondemos con mensaje amigable en lugar del help genérico.
       if (!resolvedAction) {
         try {
           const brainResult = await runMiloBrain({
@@ -100,8 +100,12 @@ export function makeMessageController(contextFactory) {
           });
 
           if (!brainResult?.ok) {
-            // Fallback suave: comportamiento anterior (help + listado de tools)
-            return res.json(okReply(initialHelpMessage(), { actions: listTools() }));
+            // Fallback amigable: mensaje útil en lugar del menú de comandos
+            const fallbackMsg =
+              'No pude procesar tu mensaje en este momento. ' +
+              'Intenta de nuevo o usa un comando específico como: ' +
+              '`templates.list`, `faltantes`, `sugerir`, `generar`, `facturar`.';
+            return res.json(okReply(fallbackMsg, { actions: listTools() }));
           }
 
           return res.json(
@@ -113,9 +117,13 @@ export function makeMessageController(contextFactory) {
             })
           );
         } catch (err) {
-          // Si algo truena MUY feo en el cerebro, también hacemos fallback al help.
+          // Si algo truena MUY feo en el cerebro, también respondemos con mensaje amigable.
           console.error('[Milo][Webhook] Error al ejecutar runMiloBrain:', err);
-          return res.json(okReply(initialHelpMessage(), { actions: listTools() }));
+          const fallbackMsg =
+            'Ocurrió un error inesperado. ' +
+            'Intenta de nuevo o usa un comando específico como: ' +
+            '`templates.list`, `faltantes`, `sugerir`, `generar`, `facturar`.';
+          return res.json(okReply(fallbackMsg, { actions: listTools() }));
         }
       }
 
