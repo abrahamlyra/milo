@@ -42,7 +42,7 @@ const NATURAL_ALIASES = [
   { re: /^faltantes$/i, action: 'fill.missing', args: () => ({}) },
   { re: /^sugerir(?:\s+(min|full))?$/i, action: 'fill.suggest', args: (m) => ({ mode: (m[1] || 'min').toLowerCase() }) },
   { re: /^generar(?:\s+documento)?$/i, action: 'documents.create', args: () => ({}) },
-  { re: /^(?:facturar|generar\s+factura)$/i, action: 'invoices.create', args: () => ({}) },
+  { re: /^(?:facturar|generar\s+factura|timbrar)$/i, action: 'invoices.create', args: () => ({}) },
   { re: /^aplicar$/i, action: 'fill.apply', args: () => ({}) },
   { re: /^set\s+.+$/i, action: 'fill.set', args: (m) => ({ __raw: m[0] }) },
 
