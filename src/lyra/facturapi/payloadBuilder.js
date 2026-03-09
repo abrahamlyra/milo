@@ -123,7 +123,12 @@ export function buildFacturaPayloadData({ contract, fields }) {
         'taxability',
         'tax_included',
         'objeto_imp',
-        'tax_mode',  // ✅ FIX: campo interno Lyra → se traduce abajo, jamás pasa a Facturapi
+        // ✅ FIX: campos internos de Lyra → se traducen abajo, jamás pasan a Facturapi
+        'tax_mode',
+        'withhold_isr',
+        'withhold_iva',
+        'ieps_enabled',
+        'ieps_rate',
         'taxes', // taxes debe vivir en product.taxes
         'product', // product lo tratamos arriba
       ]);
@@ -157,44 +162,96 @@ export function buildFacturaPayloadData({ contract, fields }) {
         destRow.product.unit_name = String(unitName);
       }
 
-      // ✅ tax_included boolean al lugar correcto
-      const taxIncluded = row?.tax_included ?? getByPath(row, 'product.tax_included');
-      if (taxIncluded != null) {
+      // ✅ tax_included boolean explícito (cuando viene directo sin tax_mode)
+      const taxIncludedExplicit = row?.tax_included ?? getByPath(row, 'product.tax_included');
+      if (taxIncludedExplicit != null) {
         if (!isObj(destRow.product)) destRow.product = {};
-        destRow.product.tax_included = normalizeBool(taxIncluded);
+        destRow.product.tax_included = normalizeBool(taxIncludedExplicit);
       }
 
-      // ✅ FIX: tax_mode (campo interno Lyra) → traduce a product.tax_included + product.taxes
-      // Valores: "included" | "add" | "exempt"
-      const taxMode = row?.tax_mode ?? getByPath(row, 'product.tax_mode');
-      if (taxMode != null) {
-        if (!isObj(destRow.product)) destRow.product = {};
-        const tm = String(taxMode).trim().toLowerCase();
+      // ✅ FIX COMPLETO: campos internos Lyra → product.tax_included + product.taxes
+      //
+      // Lyra envía:
+      //   tax_mode      : "included" | "add" | "exempt"
+      //   withhold_isr  : "true" | "false"
+      //   withhold_iva  : "true" | "false"
+      //   ieps_enabled  : "true" | "false"
+      //   ieps_rate     : "0.08"
+      //
+      // Facturapi espera:
+      //   product.tax_included : boolean
+      //   product.taxes        : [{ type, rate, withholding? }]
+      //
+      // NINGUNO de esos campos internos debe llegar a Facturapi — se limpian
+      // en ITEM_ROOT_BLOCKLIST y se traducen aquí.
+      {
+        const taxMode     = row?.tax_mode     ?? getByPath(row, 'product.tax_mode');
+        const withholdIsr = row?.withhold_isr ?? getByPath(row, 'product.withhold_isr');
+        const withholdIva = row?.withhold_iva ?? getByPath(row, 'product.withhold_iva');
+        const iepsEnabled = row?.ieps_enabled ?? getByPath(row, 'product.ieps_enabled');
+        const iepsRate    = row?.ieps_rate    ?? getByPath(row, 'product.ieps_rate');
 
-        if (tm === 'included') {
-          // IVA ya incluido en el precio — solo setear si no vino explícito
-          if (destRow.product.tax_included === undefined) destRow.product.tax_included = true;
+        const hasLyraTaxFields =
+          taxMode != null || withholdIsr != null || withholdIva != null ||
+          iepsEnabled != null || iepsRate != null;
 
-        } else if (tm === 'add') {
-          // IVA se agrega al precio (el más común)
-          if (destRow.product.tax_included === undefined) destRow.product.tax_included = false;
-          // Poner IVA 16% default solo si no hay taxes ya definidos
-          if (!Array.isArray(destRow.product.taxes) || !destRow.product.taxes.length) {
-            destRow.product.taxes = [{ type: 'IVA', rate: 0.16 }];
+        if (hasLyraTaxFields) {
+          if (!isObj(destRow.product)) destRow.product = {};
+
+          const tm          = taxMode    != null ? String(taxMode).trim().toLowerCase() : null;
+          const doRetIsr    = withholdIsr != null ? normalizeBool(withholdIsr) : false;
+          const doRetIva    = withholdIva != null ? normalizeBool(withholdIva) : false;
+          const doIeps      = iepsEnabled != null ? normalizeBool(iepsEnabled) : false;
+          const iepsRateNum = iepsRate    != null ? Number(iepsRate) : NaN;
+
+          // 1) tax_included
+          if (destRow.product.tax_included === undefined) {
+            if (tm === 'included') destRow.product.tax_included = true;
+            else if (tm === 'add' || tm === 'exempt') destRow.product.tax_included = false;
           }
 
-        } else if (tm === 'exempt') {
-          // Exento de IVA
-          if (destRow.product.tax_included === undefined) destRow.product.tax_included = false;
-          if (!Array.isArray(destRow.product.taxes) || !destRow.product.taxes.length) {
-            destRow.product.taxes = [{ type: 'IVA', rate: 0 }];
+          // 2) taxability para exento
+          if (tm === 'exempt' && destRow.product.taxability === undefined) {
+            destRow.product.taxability = '02'; // Sí objeto de impuesto, exento
           }
-          // taxability 02 = Sí objeto de impuesto pero exento
-          if (destRow.product.taxability === undefined) destRow.product.taxability = '02';
+
+          // 3) Construir product.taxes solo si no vienen ya definidos
+          if (!Array.isArray(destRow.product.taxes) || !destRow.product.taxes.length) {
+            const taxes = [];
+
+            // IVA traslado
+            if (tm === 'add') {
+              taxes.push({ type: 'IVA', rate: 0.16 });
+            } else if (tm === 'exempt') {
+              taxes.push({ type: 'IVA', rate: 0 });
+            }
+            // (si tm === 'included', tax_included=true y Facturapi no necesita entry de IVA)
+
+            // Retención ISR  10%
+            if (doRetIsr) {
+              taxes.push({ type: 'ISR', rate: 0.10, withholding: true });
+            }
+
+            // Retención IVA  10.666...% (2/3 del 16%)
+            if (doRetIva) {
+              taxes.push({ type: 'IVA', rate: 0.106666, withholding: true });
+            }
+
+            // IEPS traslado
+            if (doIeps && Number.isFinite(iepsRateNum) && iepsRateNum >= 0) {
+              taxes.push({ type: 'IEPS', rate: iepsRateNum });
+            }
+
+            if (taxes.length) destRow.product.taxes = taxes;
+          }
+
+          // Nunca dejar campos internos Lyra en product (por si llegaron anidados)
+          delete destRow.product.tax_mode;
+          delete destRow.product.withhold_isr;
+          delete destRow.product.withhold_iva;
+          delete destRow.product.ieps_enabled;
+          delete destRow.product.ieps_rate;
         }
-
-        // Nunca dejar tax_mode en product (puede haber llegado anidado)
-        delete destRow.product.tax_mode;
       }
 
       arr.push(destRow);
