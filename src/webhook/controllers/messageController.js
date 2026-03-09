@@ -82,7 +82,9 @@ export function makeMessageController(contextFactory) {
 
         if (resolvedAction === 'fill.set' && resolvedInput?.__raw) {
           const m = String(resolvedInput.__raw).match(/^set\s+(.+)$/i);
-          if (m) resolvedInput = parseKV(m[1]);
+          // Pasar como __raw para que fill.set use parseRawKV (soporta valores multi-palabra)
+          // parseKV de parsing.js usa [^\s]+ y trunca en el primer espacio
+          if (m) resolvedInput = { __raw: m[1] };
         }
       }
 
