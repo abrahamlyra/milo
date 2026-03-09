@@ -123,6 +123,7 @@ export function buildFacturaPayloadData({ contract, fields }) {
         'taxability',
         'tax_included',
         'objeto_imp',
+        'tax_mode',  // ✅ FIX: campo interno Lyra → se traduce abajo, jamás pasa a Facturapi
         'taxes', // taxes debe vivir en product.taxes
         'product', // product lo tratamos arriba
       ]);
@@ -161,6 +162,39 @@ export function buildFacturaPayloadData({ contract, fields }) {
       if (taxIncluded != null) {
         if (!isObj(destRow.product)) destRow.product = {};
         destRow.product.tax_included = normalizeBool(taxIncluded);
+      }
+
+      // ✅ FIX: tax_mode (campo interno Lyra) → traduce a product.tax_included + product.taxes
+      // Valores: "included" | "add" | "exempt"
+      const taxMode = row?.tax_mode ?? getByPath(row, 'product.tax_mode');
+      if (taxMode != null) {
+        if (!isObj(destRow.product)) destRow.product = {};
+        const tm = String(taxMode).trim().toLowerCase();
+
+        if (tm === 'included') {
+          // IVA ya incluido en el precio — solo setear si no vino explícito
+          if (destRow.product.tax_included === undefined) destRow.product.tax_included = true;
+
+        } else if (tm === 'add') {
+          // IVA se agrega al precio (el más común)
+          if (destRow.product.tax_included === undefined) destRow.product.tax_included = false;
+          // Poner IVA 16% default solo si no hay taxes ya definidos
+          if (!Array.isArray(destRow.product.taxes) || !destRow.product.taxes.length) {
+            destRow.product.taxes = [{ type: 'IVA', rate: 0.16 }];
+          }
+
+        } else if (tm === 'exempt') {
+          // Exento de IVA
+          if (destRow.product.tax_included === undefined) destRow.product.tax_included = false;
+          if (!Array.isArray(destRow.product.taxes) || !destRow.product.taxes.length) {
+            destRow.product.taxes = [{ type: 'IVA', rate: 0 }];
+          }
+          // taxability 02 = Sí objeto de impuesto pero exento
+          if (destRow.product.taxability === undefined) destRow.product.taxability = '02';
+        }
+
+        // Nunca dejar tax_mode en product (puede haber llegado anidado)
+        delete destRow.product.tax_mode;
       }
 
       arr.push(destRow);
