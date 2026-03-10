@@ -558,6 +558,44 @@ export async function runMiloBrain({
       return { ok: true, reply, usedTools: [] };
     }
 
+    // ─── fill.set → auto-progresión conversacional ────────────────────────────
+    // Después de guardar un campo, pregunta por el siguiente (o indica que ya está listo).
+    if (action === 'fill.set') {
+      let missingResult = null;
+      try {
+        missingResult = await callMiloAction({
+          action: 'fill.missing',
+          input: {},
+          contextFactory,
+          rawReq: rawPayload,
+        });
+      } catch (_) { /* ignorar — si falla fill.missing seguimos igual */ }
+
+      const missing = Array.isArray(missingResult?.missing) ? missingResult.missing : [];
+      let reply;
+      if (missing.length === 0) {
+        reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\nEscribe `generar` para crear el documento, o `mandar a tu@correo.com` si quieres que te lo envíen por correo.';
+      } else {
+        const nextKey = missing[0];
+        // Buscar label amigable del campo en el contrato guardado en sesión
+        let label = nextKey;
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
+            ? sessionData.contracts[tid].fields
+            : [];
+          const fieldSpec = contractFields.find((f) => f.key === nextKey);
+          if (fieldSpec?.label) label = fieldSpec.label;
+        } catch (_) { /* si falla, usamos la clave técnica */ }
+        reply = `✔️ Guardado.\n\n¿Cuál es el **${label}**?`;
+      }
+
+      saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+      return { ok: true, reply, usedTools: [action], rawToolResult: toolResult };
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     // ✅ Si acaban de seleccionar contrato de factura, inmediatamente listamos emisores
     if (action === 'templates.contract' && isInvoiceTypeFromContract(toolResult)) {
       let emitResult = null;
