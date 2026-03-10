@@ -82,8 +82,6 @@ export function makeMessageController(contextFactory) {
 
         if (resolvedAction === 'fill.set' && resolvedInput?.__raw) {
           const m = String(resolvedInput.__raw).match(/^set\s+(.+)$/i);
-          // Pasar como __raw para que fill.set use parseRawKV (soporta valores multi-palabra)
-          // parseKV de parsing.js usa [^\s]+ y trunca en el primer espacio
           if (m) resolvedInput = { __raw: m[1] };
         }
       }
@@ -180,6 +178,36 @@ export function makeMessageController(contextFactory) {
       }
       if (resolvedAction === 'fill.apply') {
         return res.json(okReply(formatFillApply(result), { result }));
+      }
+
+      // Delivery (preferencia de envío por correo / SMS)
+      if (
+        resolvedAction === 'fill.delivery' ||
+        resolvedAction === 'fill.delivery.reset' ||
+        resolvedAction === 'fill.delivery.get'
+      ) {
+        const d = result?.delivery || {};
+        const mode = String(d.mode || 'none').toLowerCase();
+        const emailTo = d?.email?.to ?? null;
+
+        let msg;
+        if (resolvedAction === 'fill.delivery.get') {
+          msg = mode === 'none'
+            ? 'Sin preferencia de envío configurada.'
+            : mode === 'email' && emailTo
+              ? `📧 Se enviará a **${emailTo}** por correo.`
+              : `Modo de entrega: **${mode}**.`;
+        } else if (resolvedAction === 'fill.delivery.reset') {
+          msg = '✔️ Preferencia de envío eliminada.';
+        } else if (mode === 'email' && emailTo) {
+          msg = `📧 Listo. Se enviará el documento a **${emailTo}** cuando lo generes.\nEscribe \`generar\` para generarlo y enviarlo.`;
+        } else if (mode === 'none') {
+          msg = '✔️ Entrega desactivada. El documento se generará sin envío.';
+        } else {
+          msg = `✔️ Preferencia de entrega guardada (modo: ${mode}).`;
+        }
+
+        return res.json(okReply(msg, { result }));
       }
 
       // AÑADIDO: documents.create

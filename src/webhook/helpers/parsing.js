@@ -46,6 +46,22 @@ const NATURAL_ALIASES = [
   { re: /^aplicar$/i, action: 'fill.apply', args: () => ({}) },
   { re: /^set\s+.+$/i, action: 'fill.set', args: (m) => ({ __raw: m[0] }) },
 
+  // === Delivery (envío por correo)
+  // "enviar a correo@...", "mandar a correo@...", "notificar correo@..."
+  // → fill.delivery mode=email email.to=<correo>
+  {
+    re: /^(?:enviar|mandar|notificar)\s+(?:a\s+)?([^\s@]+@[^\s@]+\.[^\s@]+)$/i,
+    action: 'fill.delivery',
+    args: (m) => ({ mode: 'email', 'email.to': m[1] }),
+  },
+  // "sin correo", "sin envío", "solo pdf"
+  // → fill.delivery mode=none
+  {
+    re: /^(?:sin\s+correo|sin\s+env[ií]o|solo\s+pdf)$/i,
+    action: 'fill.delivery',
+    args: () => ({ mode: 'none' }),
+  },
+
   // === Emitters (selección de emisor RFC)
   // list
   { re: /^(?:emisores|listar\s+emisores|ver\s+emisores)$/i, action: 'emitters.list', args: () => ({}) },
