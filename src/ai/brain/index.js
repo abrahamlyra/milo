@@ -190,6 +190,8 @@ async function planNextStep({ openai, history, message }) {
         '',
         'Reglas para entrega (correo / SMS / ambos / ninguno):',
         '- Si el usuario pide envío por correo/SMS, usa fill.delivery.',
+        '- Si el usuario escribe directamente un correo electrónico (formato xxx@xxx.xxx) como respuesta, asume que quiere envío por correo y usa fill.delivery con input: { mode: "email", email: { to: "<correo>" } }.',
+        '- Si el usuario escribe "sin correo", "no enviar", "solo pdf", "no quiero correo" o similar, usa fill.delivery con input: { mode: "none" }.',
         '',
         'Responde SIEMPRE con un JSON válido, sin texto adicional, usando esta forma:',
         '{',
@@ -574,7 +576,20 @@ export async function runMiloBrain({
       const missing = Array.isArray(missingResult?.missing) ? missingResult.missing : [];
       let reply;
       if (missing.length === 0) {
-        reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\nEscribe `generar` para crear el documento, o `mandar a tu@correo.com` si quieres que te lo envíen por correo.';
+        // Verificar si ya hay delivery configurado para no preguntar dos veces
+        let deliveryAlreadySet = false;
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          const deliveryMode = String(sessionData?.delivery?.[tid]?.mode || 'none').toLowerCase();
+          deliveryAlreadySet = deliveryMode !== 'none';
+        } catch (_) {}
+
+        if (deliveryAlreadySet) {
+          reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\nEscribe `generar` para crear y enviar el documento.';
+        } else {
+          reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
+        }
       } else {
         const nextKey = missing[0];
         // Buscar label amigable del campo en el contrato guardado en sesión
@@ -593,6 +608,67 @@ export async function runMiloBrain({
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
       return { ok: true, reply, usedTools: [action], rawToolResult: toolResult };
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ─── fill.delivery → auto-generar documento si ya hay datos completos ────
+    if (action === 'fill.delivery') {
+      const deliveryMode = String(toolResult?.delivery?.mode || 'none').toLowerCase();
+      const emailTo = toolResult?.delivery?.email?.to ?? null;
+
+      // Verificar si hay datos completos para generar
+      let canGenerate = false;
+      let missingAfterDelivery = [];
+      try {
+        const missingCheck = await callMiloAction({
+          action: 'fill.missing',
+          input: {},
+          contextFactory,
+          rawReq: rawPayload,
+        });
+        missingAfterDelivery = Array.isArray(missingCheck?.missing) ? missingCheck.missing : [];
+        canGenerate = missingAfterDelivery.length === 0;
+      } catch (_) {}
+
+      let reply;
+      if (deliveryMode === 'none') {
+        reply = canGenerate
+          ? '✔️ Sin envío. Escribe `generar` para crear el PDF.'
+          : `✔️ Sin envío configurado. Aún faltan datos: ${missingAfterDelivery.join(', ')}.`;
+      } else if (canGenerate) {
+        // Tenemos delivery + datos completos → generar automáticamente
+        let docResult = null;
+        try {
+          docResult = await callMiloAction({
+            action: 'documents.create',
+            input: {},
+            contextFactory,
+            rawReq: rawPayload,
+          });
+        } catch (docErr) {
+          console.warn('[Milo][Brain] documents.create falló tras fill.delivery:', docErr?.message);
+        }
+
+        if (docResult?.ok) {
+          const url = docResult.url || docResult.pdfUrl || null;
+          const emailLine = emailTo ? `\n📧 Enviado a **${emailTo}**.` : '';
+          reply = `✅ ¡Documento generado!${emailLine}${url ? `\n\n[Ver PDF](${url})` : ''}`;
+        } else {
+          const errDetail = docResult?.detail || docResult?.message || 'Error desconocido';
+          reply = emailTo
+            ? `📧 Listo, se enviará a **${emailTo}**.\n\nEscribe \`generar\` para crear y enviar el documento.`
+            : `✔️ Entrega configurada.\n\nEscribe \`generar\` para crear el documento.`;
+          console.warn('[Milo][Brain] documents.create tras delivery falló:', errDetail);
+        }
+      } else {
+        // Delivery configurado pero faltan datos
+        reply = emailTo
+          ? `📧 Listo, se enviará a **${emailTo}** cuando generes el documento.\n\nAún faltan datos: ${missingAfterDelivery.join(', ')}.`
+          : `✔️ Entrega configurada. Aún faltan datos: ${missingAfterDelivery.join(', ')}.`;
+      }
+
+      saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+      return { ok: true, reply, usedTools: [action, ...(canGenerate ? ['documents.create'] : [])], rawToolResult: toolResult };
     }
     // ─────────────────────────────────────────────────────────────────────────
 
