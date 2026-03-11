@@ -132,7 +132,7 @@ async function planNextStep({ openai, history, message }) {
         '- "templates.contract": seleccionar una plantilla concreta y cargar su contrato/campos.',
         '- "fill.missing": revisar qué campos faltan por rellenar en la plantilla seleccionada.',
         '- "fill.suggest": proponer valores de ejemplo o por defecto para campos faltantes.',
-        '- "fill.set": registrar valores específicos que el usuario te proporcione para uno o varios campos.',
+        '- "fill.set": registrar valores que el usuario proporcione. REGLA CRÍTICA: si el usuario da múltiples datos en un mensaje (nombres, montos, fechas, cualquier campo), extrae TODOS y ponlos en UN SOLO fill.set con todos los campos en el input JSON. Ejemplo: si dice "nombre acreedor Abraham, deudor Belinda, monto 300", el input debe ser { "nombre_acreedor": "Abraham", "nombre_deudor": "Belinda", "monto_numero": 300 }. NUNCA hagas fill.set de un solo campo si el usuario dio más de uno en el mismo mensaje.',
         '- "fill.apply": combinar lo ya proporcionado y las sugerencias para dejar listo el payload final.',
         '- "documents.create": generar un documento con la plantilla seleccionada y los datos capturados.',
         '- "invoices.create": generar una factura (CFDI) usando la plantilla seleccionada y los datos capturados.',
@@ -181,6 +181,8 @@ async function planNextStep({ openai, history, message }) {
         'Reglas para facturación CFDI (llenado de factura, NO activación de facturación):',
         '- Si el usuario habla de HACER UNA FACTURA o FACTURAR A ALGUIEN y menciona datos de receptor/conceptos, usa "fill.set" (no billing.*).',
         '- No inventes valores. Solo incluye en el input lo que el usuario haya dicho claramente.',
+        '- Si el usuario responde algo como "pues ya te los di", "ya los tienes", "que no los tienes?", "ya te lo dije", revisa el historial de la conversación y usa fill.set con los datos que SÍ mencionó antes. No repitas preguntas de campos ya dados.',
+        '- Si el bot preguntó por un campo específico y el usuario responde con un valor concreto (un número, nombre, fecha, ciudad, etc.), ese valor ES la respuesta a ese campo — úsalo en fill.set aunque el mensaje sea muy corto.',
         '',
         'Reglas para activación de facturación (billing.*):',
         '- billing.* es para registrar datos del EMISOR y CSD en la plataforma, no para una factura individual.',
@@ -574,6 +576,19 @@ export async function runMiloBrain({
       } catch (_) { /* ignorar — si falla fill.missing seguimos igual */ }
 
       const missing = Array.isArray(missingResult?.missing) ? missingResult.missing : [];
+
+      // Helper para obtener label amigable de un campo
+      const getLabel = (key) => {
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
+            ? sessionData.contracts[tid].fields : [];
+          const fieldSpec = contractFields.find((f) => f.key === key);
+          return fieldSpec?.label || key;
+        } catch (_) { return key; }
+      };
+
       let reply;
       if (missing.length === 0) {
         // Verificar si ya hay delivery configurado para no preguntar dos veces
@@ -592,18 +607,22 @@ export async function runMiloBrain({
         }
       } else {
         const nextKey = missing[0];
-        // Buscar label amigable del campo en el contrato guardado en sesión
-        let label = nextKey;
-        try {
-          const sessionData = contextFactory()?.session;
-          const tid = sessionData?.selectedTemplateId;
-          const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
-            ? sessionData.contracts[tid].fields
-            : [];
-          const fieldSpec = contractFields.find((f) => f.key === nextKey);
-          if (fieldSpec?.label) label = fieldSpec.label;
-        } catch (_) { /* si falla, usamos la clave técnica */ }
-        reply = `✔️ Guardado.\n\n¿Cuál es el **${label}**?`;
+        const label = getLabel(nextKey);
+        const savedCount = Object.keys(toolResult?.provided || {}).length;
+
+        // Si guardó varios campos de un jalón, confirmarlo
+        const savedKeys = Object.keys(input || {}).filter(k => k !== '__raw');
+        const multiSaved = savedKeys.length > 1;
+
+        const confirmLine = multiSaved
+          ? `✔️ Guardados ${savedKeys.length} campos.\n\n`
+          : '✔️ Guardado.\n\n';
+
+        const remainingLine = missing.length > 1
+          ? `Faltan **${missing.length}** datos. `
+          : '';
+
+        reply = `${confirmLine}${remainingLine}¿Cuál es el **${label}**?`;
       }
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
