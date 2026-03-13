@@ -61,7 +61,7 @@ export function registerDocumentTools(contextFactory) {
         // ====== Lectura NO intrusiva de la preferencia de entrega capturada en fill.delivery ======
         // Estructura esperada en sesión (por plantilla):
         //   s.delivery[tid] = { mode: 'none'|'email'|'sms'|'both', email: {...}, sms: {...} }
-        const delivery = s.delivery?.[tid] || { mode: 'none' };
+        const delivery = s.delivery?.[tid] || _input?.delivery || { mode: 'none' };
         const mode = String(delivery.mode || 'none').toLowerCase();
         const wantsEmail = mode === 'email' || mode === 'both';
         const wantsSms   = mode === 'sms'   || mode === 'both';
