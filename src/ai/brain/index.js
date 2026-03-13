@@ -487,6 +487,7 @@ export async function runMiloBrain({
       message,
     });
 
+    console.log("[MILO_PLAN]", JSON.stringify(plan));
     // 2) Modo chat
     if (plan.mode !== 'tool') {
       const reply =
