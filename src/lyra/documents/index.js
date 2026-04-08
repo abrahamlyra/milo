@@ -94,18 +94,35 @@ export function registerDocumentTools(contextFactory) {
         if (wantsEmail && emailTo) body.email = emailTo;
         if (wantsSms && phoneTo)  body.phone = phoneTo;
 
-        // Log de inicio de la llamada a la API
-        console.log('📝 documents.create → POST /documents', {
+        // ── Modo público: usar /public/generate en lugar de /documents ──
+        const isPublic = !!ctx.req?.body?.context?.isPublic;
+        const anonId = ctx.req?.body?.context?.anon_id || null;
+        const endpoint = isPublic ? '/public/generate' : '/documents';
+
+        if (isPublic) {
+          // /public/generate requiere email obligatorio
+          if (!body.email) {
+            return {
+              ok: false,
+              reason: 'email_required',
+              message: '¿A qué correo te enviamos el documento?',
+            };
+          }
+          if (anonId) body.anon_id = anonId;
+        }
+
+        console.log(`📝 documents.create → POST ${endpoint}`, {
           templateId: tid,
           withData: hasData,
+          isPublic,
           wantsEmail,
           wantsSms,
           hasEmailTo: Boolean(emailTo),
           hasPhoneTo: Boolean(phoneTo),
         });
 
-        const res = await ctx.http.post('/documents', body, {
-          headers: { 'Content-Type': 'application/json' }, // por si acaso
+        const res = await ctx.http.post(endpoint, body, {
+          headers: { 'Content-Type': 'application/json' },
         });
 
         const data = res?.data || {};
