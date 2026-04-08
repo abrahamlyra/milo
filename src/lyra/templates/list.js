@@ -7,14 +7,27 @@ const Input = z.object({
   audience: z.string().min(1).optional(),
 });
 
-export default function templatesList({ http }) {
+export default function templatesList({ http, req }) {
   return async (raw) => {
     const { page, q, audience } = Input.parse(raw || {});
+
+    // En modo público usar la lista hardcodeada del contexto
+    const isPublic = !!req?.body?.context?.isPublic;
+    const publicTemplates = req?.body?.context?.publicTemplates;
+
+    if (isPublic && Array.isArray(publicTemplates) && publicTemplates.length) {
+      return {
+        ok: true,
+        count: publicTemplates.length,
+        items: publicTemplates,
+        meta: null,
+      };
+    }
+
     const params = {};
     if (page) params.page = page;
     if (q) params.q = q;
 
-    // Si se filtra por audiencia, usamos el endpoint dedicado del backend.
     const path = audience ? `/templates/audience/${encodeURIComponent(audience)}` : '/templates';
 
     const { data } = await http.get(path, { params });
