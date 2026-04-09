@@ -333,6 +333,47 @@ async function buildReplyFromTool({ openai, history, message, action, input, too
     return '🧹 Emisor limpiado. Ahora puedes elegir otro con: emisor <id>';
   }
 
+  // templates.contract → arrancar conversación inteligente sin listar campos
+  if (action === 'templates.contract') {
+    const name = toolResult?.name || 'el documento';
+    const fields = Array.isArray(toolResult?.fields) ? toolResult.fields : [];
+    const required = fields.filter(f => f?.required && !String(f?.key || '').startsWith('color_'));
+
+    // Construir resumen de campos requeridos para que el LLM arme preguntas inteligentes
+    const fieldsSummary = required.map(f => `${f.key} (${f.label || f.key})`).join(', ');
+
+    const contractMessages = [
+      {
+        role: 'system',
+        content: [
+          'Eres Milo, asistente de Lyra Suite.',
+          'Acabas de cargar el contrato de un documento y tienes la lista de campos requeridos.',
+          'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
+          '',
+          'REGLAS:',
+          '- NO listes todos los campos. NO uses bullets ni headers.',
+          '- Analiza los campos requeridos y formula la PRIMERA pregunta agrupada que te permita extraer el mayor número de campos posible de una sola respuesta.',
+          '- Sé natural y conversacional, como si fuera un asistente humano.',
+          '- Máximo 1 pregunta en este primer mensaje.',
+          '- Ignora completamente los campos de color — esos los maneja el sistema.',
+          '',
+          `Campos requeridos del documento "${name}": ${fieldsSummary}`,
+        ].join('\n'),
+      },
+      ...history,
+      { role: 'user', content: String(message ?? '') },
+    ];
+
+    const contractCompletion = await openai.chat.completions.create({
+      model: DEFAULT_MODEL,
+      messages: contractMessages,
+      temperature: 0.4,
+    });
+
+    return contractCompletion.choices?.[0]?.message?.content?.trim() ||
+      `Listo, vamos a hacer tu ${name}. ¿Quiénes son las partes involucradas?`;
+  }
+
   const messages = [
     {
       role: 'system',
