@@ -117,11 +117,7 @@ function formatEmittersListForUser(toolResult) {
  * "input": { ... } // opcional
  * }
  */
-async function planNextStep({ openai, history, message, contractKeys }) {
-  const contractKeysHint = contractKeys && contractKeys.length
-    ? `\nCAMPOS EXACTOS DEL CONTRATO ACTIVO (usa SOLO estos nombres en fill.set, nunca inventes otros): ${contractKeys.join(', ')}.`
-    : '';
-
+async function planNextStep({ openai, history, message }) {
   const planningMessages = [
     {
       role: 'system',
@@ -130,7 +126,6 @@ async function planNextStep({ openai, history, message, contractKeys }) {
         'Tu tarea es decidir una de dos opciones:',
         '1) Responder tú mismo en modo chat (mode = "chat"), o',
         '2) Indicar que se debe ejecutar una acción interna de Milo (mode = "tool").',
-        contractKeysHint,
         '',
         'Acciones internas permitidas (una sola por turno):',
         '- "templates.list": listar las plantillas disponibles del usuario actual.',
@@ -176,8 +171,6 @@ async function planNextStep({ openai, history, message, contractKeys }) {
         '',
         '- Si el usuario escribe explícitamente un ID después de "usar", puedes usar directamente ese valor como "input.templateId".',
         '- Si no encuentras ningún id razonable, usa mode="chat" y explica que necesitas listar plantillas con su ID.',
-        '',
-        '- REGLA CRÍTICA: si en el historial ya existe un mensaje del asistente que arrancó el llenado de un documento (preguntando datos al usuario), significa que el contrato YA está cargado. En ese caso, cuando el usuario responda con datos, NUNCA uses templates.contract de nuevo — usa fill.set con los datos que el usuario proporcionó.',
         '',
         'Reglas para emisores (facturas multi-RFC):',
         '- Si el usuario dice "emisores", "ver emisores", "lista de emisores", debes usar:',
@@ -340,81 +333,6 @@ async function buildReplyFromTool({ openai, history, message, action, input, too
     return '🧹 Emisor limpiado. Ahora puedes elegir otro con: emisor <id>';
   }
 
-  // templates.contract → arrancar conversación inteligente agrupando por prefijo
-  if (action === 'templates.contract') {
-    const name = toolResult?.name || 'el documento';
-    const fields = Array.isArray(toolResult?.fields) ? toolResult.fields : [];
-
-    // Separar campos por tipo — ignorar colores siempre
-    const required = fields.filter(f => f?.required && !String(f?.key || '').startsWith('color_'));
-    const booleans = required.filter(f => f?.type === 'boolean');
-    const regular  = required.filter(f => f?.type !== 'boolean');
-
-    // Agrupar campos regulares por prefijo (otorgante_*, apoderado_*, testigo_*, etc.)
-    const groups = new Map();
-    for (const f of regular) {
-      const prefix = f.key.includes('_') ? f.key.split('_')[0] : 'general';
-      if (!groups.has(prefix)) groups.set(prefix, []);
-      groups.get(prefix).push(f);
-    }
-
-    // Construir descripción de grupos para el LLM
-    const groupLines = [...groups.entries()].map(([prefix, gFields]) => {
-      const keys = gFields.map(f => f.key).join(', ');
-      return `  Grupo "${prefix}": ${keys}`;
-    }).join('\n');
-
-    // Describir campos booleanos (condicionales) con sus opciones
-    const boolLines = booleans.length
-      ? 'Campos condicionales (el usuario debe elegir entre opciones):\n' +
-        booleans.map(f => `  ${f.key}`).join('\n')
-      : '';
-
-    // Todos los campos requeridos no-color para que el LLM analice cuáles son condicionales
-    const allRequiredKeys = regular.map(f => f.key).join(', ');
-
-    const contractMessages = [
-      {
-        role: 'system',
-        content: [
-          'Eres Milo, asistente de Lyra Suite.',
-          `Acabas de cargar el contrato del documento "${name}".`,
-          'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
-          '',
-          'REGLAS ESTRICTAS:',
-          '- Máximo 5 rondas de preguntas para llenar TODO el documento.',
-          '- En CADA ronda agrupa todos los campos relacionados en UNA sola pregunta.',
-          '- NO uses listas, bullets ni headers en tu respuesta.',
-          '- Sé fluido y conversacional, como un asistente humano que guía al usuario.',
-          '- Ignora completamente cualquier campo que empiece con color_ — esos los maneja el sistema.',
-          '',
-          'REGLA CRÍTICA PARA LA PRIMERA PREGUNTA:',
-          '- Analiza la lista de campos y detecta si hay alguno que determine el TIPO o MODALIDAD del documento.',
-          '- Ejemplos de campos condicionales: instrumento_notarial, tipo_carta, modalidad, clase_contrato, con_notario, etc.',
-          '- Si detectas uno o más campos así, tu PRIMERA pregunta DEBE resolverlos antes de pedir cualquier otro dato.',
-          '- Explica brevemente qué implica cada opción. Ejemplo: "¿La carta será simple (solo testigos) o notariada (requiere datos de notario)?"',
-          '- Si no hay campos condicionales, arranca directo con las partes involucradas.',
-          '',
-          `Campos requeridos del documento: ${allRequiredKeys}`,
-          '',
-          'Grupos de campos (para organizar las siguientes rondas):',
-          groupLines,
-        ].filter(Boolean).join('\n'),
-      },
-      ...history,
-      { role: 'user', content: String(message ?? '') },
-    ];
-
-    const contractCompletion = await openai.chat.completions.create({
-      model: DEFAULT_MODEL,
-      messages: contractMessages,
-      temperature: 0.4,
-    });
-
-    return contractCompletion.choices?.[0]?.message?.content?.trim() ||
-      `Listo, vamos a llenar tu ${name}. ¿Quiénes son las partes involucradas?`;
-  }
-
   const messages = [
     {
       role: 'system',
@@ -562,114 +480,14 @@ export async function runMiloBrain({
       };
     }
 
-    // 🔥 FAST-PATH: usuario eligió colores default → omitir color_* y pedir correo
-    const mLower = m.toLowerCase();
-    const isColorDefault =
-      mLower === 'default' ||
-      mLower === 'predeterminado' ||
-      mLower === 'predeterminados' ||
-      mLower === 'usar default' ||
-      mLower === 'usar predeterminado' ||
-      mLower === 'colores default' ||
-      mLower === 'diseño default';
-
-    if (isColorDefault) {
-      // Verificar que efectivamente quedan solo color_* pendientes en la sesión
-      let soloColoresPendientes = false;
-      try {
-        const missingCheck = await callMiloAction({
-          action: 'fill.missing',
-          input: {},
-          contextFactory,
-          rawReq: rawPayload,
-        });
-        const allMissing = Array.isArray(missingCheck?.missing) ? missingCheck.missing : [];
-        const realMissing = allMissing.filter(k => !String(k).startsWith('color_'));
-        soloColoresPendientes = realMissing.length === 0 && allMissing.length > 0;
-      } catch (_) {}
-
-      if (soloColoresPendientes) {
-        let deliveryAlreadySet = false;
-        try {
-          const sessionData = contextFactory()?.session;
-          const tid = sessionData?.selectedTemplateId;
-          const deliveryMode = String(sessionData?.delivery?.[tid]?.mode || 'none').toLowerCase();
-          deliveryAlreadySet = deliveryMode !== 'none';
-        } catch (_) {}
-
-        const reply = deliveryAlreadySet
-          ? '✔️ Usando diseño predeterminado. Escribe `generar` para crear el documento.'
-          : '✔️ Usando diseño predeterminado.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
-
-        saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
-        return { ok: true, reply, usedTools: [], provided: null };
-      }
-    }
-
     // 1) Planner decide
-    let contractKeys = [];
-    try {
-      const sessionData = contextFactory()?.session;
-      const tid = sessionData?.selectedTemplateId || sessionData?.meta?.selectedTemplateId;
-      if (tid) {
-        const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
-          ? sessionData.contracts[tid].fields : [];
-        contractKeys = contractFields
-          .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
-          .map(f => f.key)
-          .filter(Boolean);
-      }
-    } catch (_) {}
-
     const plan = await planNextStep({
       openai,
       history,
       message,
-      contractKeys,
     });
 
     console.log("[MILO_PLAN]", JSON.stringify(plan));
-
-    // 🔒 GUARD: si el planner insiste en templates.contract pero ya hay un template
-    // seleccionado en sesión, significa que el usuario está respondiendo datos — forzar fill.set
-    if (plan.action === 'templates.contract') {
-      try {
-        const sessionData = contextFactory()?.session;
-        const alreadySelected = sessionData?.selectedTemplateId || sessionData?.meta?.selectedTemplateId;
-        if (alreadySelected) {
-          console.log('[Milo][Brain] Guard: templates.contract bloqueado, ya hay template. Forzando fill.set.');
-
-          // Obtener keys exactos del contrato para que el planner use los nombres correctos
-          const tid = alreadySelected;
-          const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
-            ? sessionData.contracts[tid].fields
-            : [];
-          const fieldKeys = contractFields
-            .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
-            .map(f => f.key)
-            .filter(Boolean);
-
-          const keysHint = fieldKeys.length
-            ? `Los campos exactos del contrato son: ${fieldKeys.join(', ')}.`
-            : '';
-
-          const rePlan = await planNextStep({
-            openai,
-            history,
-            message,
-            contractKeys: fieldKeys,
-          });
-
-          if (rePlan.action === 'fill.set' && rePlan.input && Object.keys(rePlan.input).length > 0) {
-            plan.action = 'fill.set';
-            plan.input = rePlan.input;
-          } else {
-            plan.action = 'fill.set';
-            plan.input = { __raw: String(message ?? '') };
-          }
-        }
-      } catch (_) {}
-    }
     // 2) Modo chat
     if (plan.mode !== 'tool') {
       const reply =
@@ -772,13 +590,8 @@ export async function runMiloBrain({
         } catch (_) { return key; }
       };
 
-      // Separar faltantes: campos reales vs solo colores
-      const colorMissing  = missing.filter(k => String(k).startsWith('color_'));
-      const realMissing   = missing.filter(k => !String(k).startsWith('color_'));
-      const onlyColorLeft = realMissing.length === 0 && colorMissing.length > 0;
-
       let reply;
-      if (missing.length === 0 || onlyColorLeft) {
+      if (missing.length === 0) {
         // Verificar si ya hay delivery configurado para no preguntar dos veces
         let deliveryAlreadySet = false;
         try {
@@ -788,79 +601,33 @@ export async function runMiloBrain({
           deliveryAlreadySet = deliveryMode !== 'none';
         } catch (_) {}
 
-        // Si quedan solo colores, preguntar antes del correo
-        if (onlyColorLeft) {
-          reply = '✔️ Ya tengo todos los datos del documento.\n\n¿Quieres usar el diseño de colores predeterminado o personalizarlos? Escribe `default` para usar el diseño estándar, o dime los colores que prefieras.';
-        } else if (deliveryAlreadySet) {
+        if (deliveryAlreadySet) {
           reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\nEscribe `generar` para crear y enviar el documento.';
         } else {
           reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
         }
       } else {
-        // Agrupar campos faltantes por prefijo para hacer preguntas inteligentes
-        const groups = new Map();
-        for (const key of realMissing) {
-          const prefix = key.includes('_') ? key.split('_')[0] : 'general';
-          if (!groups.has(prefix)) groups.set(prefix, []);
-          groups.get(prefix).push(key);
-        }
+        const nextKey = missing[0];
+        const label = getLabel(nextKey);
+        const savedCount = Object.keys(toolResult?.provided || {}).length;
 
-        // Obtener labels amigables y specs de los campos faltantes
-        let contractFields = [];
-        try {
-          const sessionData = contextFactory()?.session;
-          const tid = sessionData?.selectedTemplateId;
-          contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
-            ? sessionData.contracts[tid].fields : [];
-        } catch (_) {}
-
-        const groupLines = [...groups.entries()].map(([prefix, keys]) => {
-          const labels = keys.map(k => {
-            const spec = contractFields.find(f => f.key === k);
-            return spec?.label || k;
-          });
-          return `  Grupo "${prefix}": ${labels.join(', ')}`;
-        }).join('\n');
-
+        // Si guardó varios campos de un jalón, confirmarlo
         const savedKeys = Object.keys(input || {}).filter(k => k !== '__raw');
-        const confirmLine = savedKeys.length > 1
-          ? `✔️ Guardados ${savedKeys.length} campos.`
-          : '✔️ Guardado.';
+        const multiSaved = savedKeys.length > 1;
 
-        const nextGroupMessages = [
-          {
-            role: 'system',
-            content: [
-              'Eres Milo, asistente de Lyra Suite.',
-              'Acabas de guardar campos de un documento y quedan datos por completar.',
-              'Tu tarea es formular LA SIGUIENTE PREGUNTA agrupando el mayor número posible de campos relacionados.',
-              '',
-              'REGLAS:',
-              '- Máximo una pregunta por turno, pero que cubra todos los campos de UN grupo relacionado.',
-              '- NO uses listas, bullets ni headers.',
-              '- Sé conversacional y natural, no robótico.',
-              '- Ignora completamente cualquier campo que empiece con color_.',
-              '- Si solo queda un grupo, pregunta todos sus campos en una sola oración natural.',
-              '',
-              `Campos que faltan (agrupados por prefijo):\n${groupLines}`,
-            ].join('\n'),
-          },
-          ...history,
-          { role: 'user', content: `${confirmLine} ¿Qué sigue?` },
-        ];
+        const confirmLine = multiSaved
+          ? `✔️ Guardados ${savedKeys.length} campos.\n\n`
+          : '✔️ Guardado.\n\n';
 
-        const nextGroupCompletion = await openai.chat.completions.create({
-          model: DEFAULT_MODEL,
-          messages: nextGroupMessages,
-          temperature: 0.4,
-        });
+        const remainingLine = missing.length > 1
+          ? `Faltan **${missing.length}** datos. `
+          : '';
 
-        reply = nextGroupCompletion.choices?.[0]?.message?.content?.trim() ||
-          `${confirmLine} ¿Puedes darme los datos del grupo "${[...groups.keys()][0]}"?`;
+        reply = `${confirmLine}${remainingLine}¿Cuál es el **${label}**?`;
       }
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
-      return { ok: true, reply, usedTools: [action], rawToolResult: toolResult, provided: toolResult?.provided || null };
+      return { ok: true, reply, usedTools: [action], rawToolResult: toolResult };
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -1004,7 +771,6 @@ export async function runMiloBrain({
       usedTools: [action],
       rawToolResult: toolResult,
       templates,
-      provided: toolResult?.provided || null,
     };
   } catch (err) {
     console.error('[Milo][Brain] Error en runMiloBrain:', {
