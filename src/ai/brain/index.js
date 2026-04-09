@@ -728,23 +728,66 @@ export async function runMiloBrain({
           reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
         }
       } else {
-        const nextKey = missing[0];
-        const label = getLabel(nextKey);
-        const savedCount = Object.keys(toolResult?.provided || {}).length;
+        // Agrupar campos faltantes por prefijo para hacer preguntas inteligentes
+        const groups = new Map();
+        for (const key of realMissing) {
+          const prefix = key.includes('_') ? key.split('_')[0] : 'general';
+          if (!groups.has(prefix)) groups.set(prefix, []);
+          groups.get(prefix).push(key);
+        }
 
-        // Si guardó varios campos de un jalón, confirmarlo
+        // Obtener labels amigables y specs de los campos faltantes
+        let contractFields = [];
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
+            ? sessionData.contracts[tid].fields : [];
+        } catch (_) {}
+
+        const groupLines = [...groups.entries()].map(([prefix, keys]) => {
+          const labels = keys.map(k => {
+            const spec = contractFields.find(f => f.key === k);
+            return spec?.label || k;
+          });
+          return `  Grupo "${prefix}": ${labels.join(', ')}`;
+        }).join('\n');
+
         const savedKeys = Object.keys(input || {}).filter(k => k !== '__raw');
-        const multiSaved = savedKeys.length > 1;
+        const confirmLine = savedKeys.length > 1
+          ? `✔️ Guardados ${savedKeys.length} campos.`
+          : '✔️ Guardado.';
 
-        const confirmLine = multiSaved
-          ? `✔️ Guardados ${savedKeys.length} campos.\n\n`
-          : '✔️ Guardado.\n\n';
+        const nextGroupMessages = [
+          {
+            role: 'system',
+            content: [
+              'Eres Milo, asistente de Lyra Suite.',
+              'Acabas de guardar campos de un documento y quedan datos por completar.',
+              'Tu tarea es formular LA SIGUIENTE PREGUNTA agrupando el mayor número posible de campos relacionados.',
+              '',
+              'REGLAS:',
+              '- Máximo una pregunta por turno, pero que cubra todos los campos de UN grupo relacionado.',
+              '- NO uses listas, bullets ni headers.',
+              '- Sé conversacional y natural, no robótico.',
+              '- Ignora completamente cualquier campo que empiece con color_.',
+              '- Si solo queda un grupo, pregunta todos sus campos en una sola oración natural.',
+              '',
+              `Campos que faltan (agrupados por prefijo):\n${groupLines}`,
+            ].join('\n'),
+          },
+          ...history,
+          { role: 'user', content: `${confirmLine} ¿Qué sigue?` },
+        ];
 
-        const remainingLine = missing.length > 1
-          ? `Faltan **${missing.length}** datos. `
-          : '';
+        const nextGroupCompletion = await openai.chat.completions.create({
+          model: DEFAULT_MODEL,
+          messages: nextGroupMessages,
+          temperature: 0.4,
+        });
 
-        reply = `${confirmLine}${remainingLine}¿Cuál es el **${label}**?`;
+        reply = nextGroupCompletion.choices?.[0]?.message?.content?.trim() ||
+          `${confirmLine} ¿Puedes darme los datos del grupo "${[...groups.keys()][0]}"?`;
       }
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
