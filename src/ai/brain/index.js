@@ -117,7 +117,11 @@ function formatEmittersListForUser(toolResult) {
  * "input": { ... } // opcional
  * }
  */
-async function planNextStep({ openai, history, message }) {
+async function planNextStep({ openai, history, message, contractKeys }) {
+  const contractKeysHint = contractKeys && contractKeys.length
+    ? `\nCAMPOS EXACTOS DEL CONTRATO ACTIVO (usa SOLO estos nombres en fill.set, nunca inventes otros): ${contractKeys.join(', ')}.`
+    : '';
+
   const planningMessages = [
     {
       role: 'system',
@@ -126,6 +130,7 @@ async function planNextStep({ openai, history, message }) {
         'Tu tarea es decidir una de dos opciones:',
         '1) Responder tú mismo en modo chat (mode = "chat"), o',
         '2) Indicar que se debe ejecutar una acción interna de Milo (mode = "tool").',
+        contractKeysHint,
         '',
         'Acciones internas permitidas (una sola por turno):',
         '- "templates.list": listar las plantillas disponibles del usuario actual.',
@@ -602,10 +607,25 @@ export async function runMiloBrain({
     }
 
     // 1) Planner decide
+    let contractKeys = [];
+    try {
+      const sessionData = contextFactory()?.session;
+      const tid = sessionData?.selectedTemplateId || sessionData?.meta?.selectedTemplateId;
+      if (tid) {
+        const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
+          ? sessionData.contracts[tid].fields : [];
+        contractKeys = contractFields
+          .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
+          .map(f => f.key)
+          .filter(Boolean);
+      }
+    } catch (_) {}
+
     const plan = await planNextStep({
       openai,
       history,
       message,
+      contractKeys,
     });
 
     console.log("[MILO_PLAN]", JSON.stringify(plan));
@@ -636,7 +656,8 @@ export async function runMiloBrain({
           const rePlan = await planNextStep({
             openai,
             history,
-            message: `[INSTRUCCIÓN: usa fill.set para guardar los datos que el usuario acaba de dar. ${keysHint} Usa EXACTAMENTE esos nombres de campo, no inventes otros.] ${message}`,
+            message,
+            contractKeys: fieldKeys,
           });
 
           if (rePlan.action === 'fill.set' && rePlan.input && Object.keys(rePlan.input).length > 0) {
