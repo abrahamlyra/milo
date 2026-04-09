@@ -549,6 +549,50 @@ export async function runMiloBrain({
       };
     }
 
+    // 🔥 FAST-PATH: usuario eligió colores default → omitir color_* y pedir correo
+    const mLower = m.toLowerCase();
+    const isColorDefault =
+      mLower === 'default' ||
+      mLower === 'predeterminado' ||
+      mLower === 'predeterminados' ||
+      mLower === 'usar default' ||
+      mLower === 'usar predeterminado' ||
+      mLower === 'colores default' ||
+      mLower === 'diseño default';
+
+    if (isColorDefault) {
+      // Verificar que efectivamente quedan solo color_* pendientes en la sesión
+      let soloColoresPendientes = false;
+      try {
+        const missingCheck = await callMiloAction({
+          action: 'fill.missing',
+          input: {},
+          contextFactory,
+          rawReq: rawPayload,
+        });
+        const allMissing = Array.isArray(missingCheck?.missing) ? missingCheck.missing : [];
+        const realMissing = allMissing.filter(k => !String(k).startsWith('color_'));
+        soloColoresPendientes = realMissing.length === 0 && allMissing.length > 0;
+      } catch (_) {}
+
+      if (soloColoresPendientes) {
+        let deliveryAlreadySet = false;
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          const deliveryMode = String(sessionData?.delivery?.[tid]?.mode || 'none').toLowerCase();
+          deliveryAlreadySet = deliveryMode !== 'none';
+        } catch (_) {}
+
+        const reply = deliveryAlreadySet
+          ? '✔️ Usando diseño predeterminado. Escribe `generar` para crear el documento.'
+          : '✔️ Usando diseño predeterminado.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
+
+        saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+        return { ok: true, reply, usedTools: [], provided: null };
+      }
+    }
+
     // 1) Planner decide
     const plan = await planNextStep({
       openai,
@@ -659,8 +703,13 @@ export async function runMiloBrain({
         } catch (_) { return key; }
       };
 
+      // Separar faltantes: campos reales vs solo colores
+      const colorMissing  = missing.filter(k => String(k).startsWith('color_'));
+      const realMissing   = missing.filter(k => !String(k).startsWith('color_'));
+      const onlyColorLeft = realMissing.length === 0 && colorMissing.length > 0;
+
       let reply;
-      if (missing.length === 0) {
+      if (missing.length === 0 || onlyColorLeft) {
         // Verificar si ya hay delivery configurado para no preguntar dos veces
         let deliveryAlreadySet = false;
         try {
@@ -670,7 +719,10 @@ export async function runMiloBrain({
           deliveryAlreadySet = deliveryMode !== 'none';
         } catch (_) {}
 
-        if (deliveryAlreadySet) {
+        // Si quedan solo colores, preguntar antes del correo
+        if (onlyColorLeft) {
+          reply = '✔️ Ya tengo todos los datos del documento.\n\n¿Quieres usar el diseño de colores predeterminado o personalizarlos? Escribe `default` para usar el diseño estándar, o dime los colores que prefieras.';
+        } else if (deliveryAlreadySet) {
           reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\nEscribe `generar` para crear y enviar el documento.';
         } else {
           reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
@@ -696,7 +748,7 @@ export async function runMiloBrain({
       }
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
-      return { ok: true, reply, usedTools: [action], rawToolResult: toolResult };
+      return { ok: true, reply, usedTools: [action], rawToolResult: toolResult, provided: toolResult?.provided || null };
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -840,6 +892,7 @@ export async function runMiloBrain({
       usedTools: [action],
       rawToolResult: toolResult,
       templates,
+      provided: toolResult?.provided || null,
     };
   } catch (err) {
     console.error('[Milo][Brain] Error en runMiloBrain:', {
