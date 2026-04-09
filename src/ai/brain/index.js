@@ -333,32 +333,60 @@ async function buildReplyFromTool({ openai, history, message, action, input, too
     return '🧹 Emisor limpiado. Ahora puedes elegir otro con: emisor <id>';
   }
 
-  // templates.contract → arrancar conversación inteligente sin listar campos
+  // templates.contract → arrancar conversación inteligente agrupando por prefijo
   if (action === 'templates.contract') {
     const name = toolResult?.name || 'el documento';
     const fields = Array.isArray(toolResult?.fields) ? toolResult.fields : [];
-    const required = fields.filter(f => f?.required && !String(f?.key || '').startsWith('color_'));
 
-    // Construir resumen de campos requeridos para que el LLM arme preguntas inteligentes
-    const fieldsSummary = required.map(f => `${f.key} (${f.label || f.key})`).join(', ');
+    // Separar campos por tipo — ignorar colores siempre
+    const required = fields.filter(f => f?.required && !String(f?.key || '').startsWith('color_'));
+    const booleans = required.filter(f => f?.type === 'boolean');
+    const regular  = required.filter(f => f?.type !== 'boolean');
+
+    // Agrupar campos regulares por prefijo (otorgante_*, apoderado_*, testigo_*, etc.)
+    const groups = new Map();
+    for (const f of regular) {
+      const prefix = f.key.includes('_') ? f.key.split('_')[0] : 'general';
+      if (!groups.has(prefix)) groups.set(prefix, []);
+      groups.get(prefix).push(f);
+    }
+
+    // Construir descripción de grupos para el LLM
+    const groupLines = [...groups.entries()].map(([prefix, gFields]) => {
+      const keys = gFields.map(f => f.key).join(', ');
+      return `  Grupo "${prefix}": ${keys}`;
+    }).join('\n');
+
+    // Describir campos booleanos (condicionales) con sus opciones
+    const boolLines = booleans.length
+      ? 'Campos condicionales (el usuario debe elegir entre opciones):\n' +
+        booleans.map(f => `  ${f.key}`).join('\n')
+      : '';
 
     const contractMessages = [
       {
         role: 'system',
         content: [
           'Eres Milo, asistente de Lyra Suite.',
-          'Acabas de cargar el contrato de un documento y tienes la lista de campos requeridos.',
+          `Acabas de cargar el contrato del documento "${name}".`,
           'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
           '',
-          'REGLAS:',
-          '- NO listes todos los campos. NO uses bullets ni headers.',
-          '- Analiza los campos requeridos y formula la PRIMERA pregunta agrupada que te permita extraer el mayor número de campos posible de una sola respuesta.',
-          '- Sé natural y conversacional, como si fuera un asistente humano.',
-          '- Máximo 1 pregunta en este primer mensaje.',
-          '- Ignora completamente los campos de color — esos los maneja el sistema.',
+          'REGLAS ESTRICTAS:',
+          '- Máximo 5 rondas de preguntas para llenar TODO el documento.',
+          '- En CADA ronda agrupa todos los campos relacionados en UNA sola pregunta.',
+          '- Los campos están agrupados por prefijo — cada grupo es una sola pregunta.',
+          '- NO uses listas, bullets ni headers en tu respuesta.',
+          '- Para los campos condicionales (booleanos), explica brevemente la diferencia entre las opciones antes de preguntar.',
+          '  Ejemplo: si hay "carta_simple" y "carta_notariada", di "¿La carta será simple (solo testigos) o notariada (requiere datos de notario)?"',
+          '- Sé fluido y conversacional, como un asistente humano que guía al usuario.',
+          '- Ignora completamente los campos de color — esos los maneja el sistema al final.',
+          '- En esta PRIMERA pregunta, arranca con el grupo más importante (partes involucradas, datos principales).',
           '',
-          `Campos requeridos del documento "${name}": ${fieldsSummary}`,
-        ].join('\n'),
+          'Grupos de campos del documento:',
+          groupLines,
+          '',
+          boolLines,
+        ].filter(Boolean).join('\n'),
       },
       ...history,
       { role: 'user', content: String(message ?? '') },
@@ -371,7 +399,7 @@ async function buildReplyFromTool({ openai, history, message, action, input, too
     });
 
     return contractCompletion.choices?.[0]?.message?.content?.trim() ||
-      `Listo, vamos a hacer tu ${name}. ¿Quiénes son las partes involucradas?`;
+      `Listo, vamos a llenar tu ${name}. ¿Quiénes son las partes involucradas?`;
   }
 
   const messages = [
