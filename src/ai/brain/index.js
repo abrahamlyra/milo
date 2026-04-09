@@ -363,30 +363,43 @@ async function buildReplyFromTool({ openai, history, message, action, input, too
         booleans.map(f => `  ${f.key}`).join('\n')
       : '';
 
+    // Si hay booleanos, la primera pregunta SIEMPRE los resuelve — de su respuesta
+    // depende qué otros campos son necesarios (ej: carta simple vs notariada).
+    const systemLines = [
+      'Eres Milo, asistente de Lyra Suite.',
+      `Acabas de cargar el contrato del documento "${name}".`,
+      'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
+      '',
+      'REGLAS ESTRICTAS:',
+      '- Máximo 5 rondas de preguntas para llenar TODO el documento.',
+      '- En CADA ronda agrupa todos los campos relacionados en UNA sola pregunta.',
+      '- Los campos están agrupados por prefijo — cada grupo es una sola pregunta.',
+      '- NO uses listas, bullets ni headers en tu respuesta.',
+      '- Sé fluido y conversacional, como un asistente humano que guía al usuario.',
+      '- Ignora completamente los campos de color — esos los maneja el sistema al final.',
+    ];
+
+    if (booleans.length > 0) {
+      systemLines.push('');
+      systemLines.push('REGLA CRÍTICA: Este documento tiene campos condicionales que determinan qué otros datos se necesitan.');
+      systemLines.push('Tu PRIMERA pregunta OBLIGATORIAMENTE debe resolver estos campos condicionales antes de pedir cualquier otro dato.');
+      systemLines.push('Para cada campo condicional, explica brevemente qué implica cada opción y pregunta cuál aplica.');
+      systemLines.push('Ejemplo: "¿La carta será simple (solo requiere testigos) o notariada (requiere datos del notario)?"');
+      systemLines.push('');
+      systemLines.push('Campos condicionales a resolver PRIMERO:');
+      booleans.forEach(f => systemLines.push(`  - ${f.label || f.key}`));
+    } else {
+      systemLines.push('- En esta PRIMERA pregunta, arranca con el grupo más importante (partes involucradas, datos principales).');
+    }
+
+    systemLines.push('');
+    systemLines.push('Grupos de campos del documento (para las siguientes rondas):');
+    systemLines.push(groupLines);
+
     const contractMessages = [
       {
         role: 'system',
-        content: [
-          'Eres Milo, asistente de Lyra Suite.',
-          `Acabas de cargar el contrato del documento "${name}".`,
-          'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
-          '',
-          'REGLAS ESTRICTAS:',
-          '- Máximo 5 rondas de preguntas para llenar TODO el documento.',
-          '- En CADA ronda agrupa todos los campos relacionados en UNA sola pregunta.',
-          '- Los campos están agrupados por prefijo — cada grupo es una sola pregunta.',
-          '- NO uses listas, bullets ni headers en tu respuesta.',
-          '- Para los campos condicionales (booleanos), explica brevemente la diferencia entre las opciones antes de preguntar.',
-          '  Ejemplo: si hay "carta_simple" y "carta_notariada", di "¿La carta será simple (solo testigos) o notariada (requiere datos de notario)?"',
-          '- Sé fluido y conversacional, como un asistente humano que guía al usuario.',
-          '- Ignora completamente los campos de color — esos los maneja el sistema al final.',
-          '- En esta PRIMERA pregunta, arranca con el grupo más importante (partes involucradas, datos principales).',
-          '',
-          'Grupos de campos del documento:',
-          groupLines,
-          '',
-          boolLines,
-        ].filter(Boolean).join('\n'),
+        content: systemLines.filter(Boolean).join('\n'),
       },
       ...history,
       { role: 'user', content: String(message ?? '') },
