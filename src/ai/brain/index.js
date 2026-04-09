@@ -609,6 +609,20 @@ export async function runMiloBrain({
     });
 
     console.log("[MILO_PLAN]", JSON.stringify(plan));
+
+    // 🔒 GUARD: si el planner insiste en templates.contract pero ya hay un template
+    // seleccionado en sesión, significa que el usuario está respondiendo datos — forzar fill.set
+    if (plan.action === 'templates.contract') {
+      try {
+        const sessionData = contextFactory()?.session;
+        const alreadySelected = sessionData?.selectedTemplateId || sessionData?.meta?.selectedTemplateId;
+        if (alreadySelected) {
+          console.log('[Milo][Brain] Guard: templates.contract bloqueado, ya hay template. Forzando fill.set.');
+          plan.action = 'fill.set';
+          plan.input = { __raw: String(message ?? '') };
+        }
+      } catch (_) {}
+    }
     // 2) Modo chat
     if (plan.mode !== 'tool') {
       const reply =
