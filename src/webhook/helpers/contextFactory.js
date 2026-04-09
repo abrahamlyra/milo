@@ -28,6 +28,17 @@ export function createContextFactory(getCurrentReq) {
     if (selectedEmitterId) session.meta.selectedEmitterId = selectedEmitterId;
     if (selectedTemplateId) session.meta.selectedTemplateId = selectedTemplateId;
 
+    // ✅ Hidratar contrato desde context si viene — sobrevive entre instancias de Cloud Run
+    const incomingContract = body?.context?.contract;
+    if (selectedTemplateId && incomingContract && Array.isArray(incomingContract?.fields)) {
+      session.selectedTemplateId = selectedTemplateId;
+      session.contracts = session.contracts || {};
+      session.contracts[selectedTemplateId] = session.contracts[selectedTemplateId] || incomingContract;
+      session.contract = session.contract || incomingContract;
+      session.provided = session.provided || {};
+      session.provided[selectedTemplateId] = session.provided[selectedTemplateId] || {};
+    }
+
     const http = makeClient({
       baseURL: config.lyraApiUrl, // ya incluye /api
       timeoutMs: config.httpTimeoutMs,
