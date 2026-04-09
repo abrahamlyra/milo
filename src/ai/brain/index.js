@@ -618,8 +618,27 @@ export async function runMiloBrain({
         const alreadySelected = sessionData?.selectedTemplateId || sessionData?.meta?.selectedTemplateId;
         if (alreadySelected) {
           console.log('[Milo][Brain] Guard: templates.contract bloqueado, ya hay template. Forzando fill.set.');
-          // Re-planear con instrucción explícita de fill.set
-          const rePlan = await planNextStep({ openai, history, message: `[INSTRUCCIÓN: usa fill.set para guardar los datos que el usuario acaba de dar] ${message}` });
+
+          // Obtener keys exactos del contrato para que el planner use los nombres correctos
+          const tid = alreadySelected;
+          const contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
+            ? sessionData.contracts[tid].fields
+            : [];
+          const fieldKeys = contractFields
+            .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
+            .map(f => f.key)
+            .filter(Boolean);
+
+          const keysHint = fieldKeys.length
+            ? `Los campos exactos del contrato son: ${fieldKeys.join(', ')}.`
+            : '';
+
+          const rePlan = await planNextStep({
+            openai,
+            history,
+            message: `[INSTRUCCIÓN: usa fill.set para guardar los datos que el usuario acaba de dar. ${keysHint} Usa EXACTAMENTE esos nombres de campo, no inventes otros.] ${message}`,
+          });
+
           if (rePlan.action === 'fill.set' && rePlan.input && Object.keys(rePlan.input).length > 0) {
             plan.action = 'fill.set';
             plan.input = rePlan.input;
