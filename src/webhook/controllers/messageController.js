@@ -114,6 +114,7 @@ export function makeMessageController(contextFactory) {
               usedTools: brainResult.usedTools || [],
               // 👇 NUEVO: pasamos también la lista de templates (si aplica)
               templates: brainResult.templates || undefined,
+              provided: brainResult.provided || undefined,
             })
           );
         } catch (err) {
