@@ -172,6 +172,8 @@ async function planNextStep({ openai, history, message }) {
         '- Si el usuario escribe explícitamente un ID después de "usar", puedes usar directamente ese valor como "input.templateId".',
         '- Si no encuentras ningún id razonable, usa mode="chat" y explica que necesitas listar plantillas con su ID.',
         '',
+        '- REGLA CRÍTICA: si en el historial ya existe un mensaje del asistente que arrancó el llenado de un documento (preguntando datos al usuario), significa que el contrato YA está cargado. En ese caso, cuando el usuario responda con datos, NUNCA uses templates.contract de nuevo — usa fill.set con los datos que el usuario proporcionó.',
+        '',
         'Reglas para emisores (facturas multi-RFC):',
         '- Si el usuario dice "emisores", "ver emisores", "lista de emisores", debes usar:',
         '  { "mode": "tool", "action": "emitters.list", "input": {} }',
