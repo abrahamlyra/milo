@@ -618,8 +618,15 @@ export async function runMiloBrain({
         const alreadySelected = sessionData?.selectedTemplateId || sessionData?.meta?.selectedTemplateId;
         if (alreadySelected) {
           console.log('[Milo][Brain] Guard: templates.contract bloqueado, ya hay template. Forzando fill.set.');
-          plan.action = 'fill.set';
-          plan.input = { __raw: String(message ?? '') };
+          // Re-planear con instrucción explícita de fill.set
+          const rePlan = await planNextStep({ openai, history, message: `[INSTRUCCIÓN: usa fill.set para guardar los datos que el usuario acaba de dar] ${message}` });
+          if (rePlan.action === 'fill.set' && rePlan.input && Object.keys(rePlan.input).length > 0) {
+            plan.action = 'fill.set';
+            plan.input = rePlan.input;
+          } else {
+            plan.action = 'fill.set';
+            plan.input = { __raw: String(message ?? '') };
+          }
         }
       } catch (_) {}
     }
