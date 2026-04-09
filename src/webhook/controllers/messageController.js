@@ -112,9 +112,9 @@ export function makeMessageController(contextFactory) {
             okReply(brainResult.reply, {
               mode: 'llm',
               usedTools: brainResult.usedTools || [],
-              // 👇 NUEVO: pasamos también la lista de templates (si aplica)
               templates: brainResult.templates || undefined,
               provided: brainResult.provided || undefined,
+              result: brainResult.rawToolResult || undefined,
             })
           );
         } catch (err) {
