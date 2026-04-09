@@ -363,43 +363,36 @@ async function buildReplyFromTool({ openai, history, message, action, input, too
         booleans.map(f => `  ${f.key}`).join('\n')
       : '';
 
-    // Si hay booleanos, la primera pregunta SIEMPRE los resuelve — de su respuesta
-    // depende qué otros campos son necesarios (ej: carta simple vs notariada).
-    const systemLines = [
-      'Eres Milo, asistente de Lyra Suite.',
-      `Acabas de cargar el contrato del documento "${name}".`,
-      'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
-      '',
-      'REGLAS ESTRICTAS:',
-      '- Máximo 5 rondas de preguntas para llenar TODO el documento.',
-      '- En CADA ronda agrupa todos los campos relacionados en UNA sola pregunta.',
-      '- Los campos están agrupados por prefijo — cada grupo es una sola pregunta.',
-      '- NO uses listas, bullets ni headers en tu respuesta.',
-      '- Sé fluido y conversacional, como un asistente humano que guía al usuario.',
-      '- Ignora completamente los campos de color — esos los maneja el sistema al final.',
-    ];
-
-    if (booleans.length > 0) {
-      systemLines.push('');
-      systemLines.push('REGLA CRÍTICA: Este documento tiene campos condicionales que determinan qué otros datos se necesitan.');
-      systemLines.push('Tu PRIMERA pregunta OBLIGATORIAMENTE debe resolver estos campos condicionales antes de pedir cualquier otro dato.');
-      systemLines.push('Para cada campo condicional, explica brevemente qué implica cada opción y pregunta cuál aplica.');
-      systemLines.push('Ejemplo: "¿La carta será simple (solo requiere testigos) o notariada (requiere datos del notario)?"');
-      systemLines.push('');
-      systemLines.push('Campos condicionales a resolver PRIMERO:');
-      booleans.forEach(f => systemLines.push(`  - ${f.label || f.key}`));
-    } else {
-      systemLines.push('- En esta PRIMERA pregunta, arranca con el grupo más importante (partes involucradas, datos principales).');
-    }
-
-    systemLines.push('');
-    systemLines.push('Grupos de campos del documento (para las siguientes rondas):');
-    systemLines.push(groupLines);
+    // Todos los campos requeridos no-color para que el LLM analice cuáles son condicionales
+    const allRequiredKeys = regular.map(f => f.key).join(', ');
 
     const contractMessages = [
       {
         role: 'system',
-        content: systemLines.filter(Boolean).join('\n'),
+        content: [
+          'Eres Milo, asistente de Lyra Suite.',
+          `Acabas de cargar el contrato del documento "${name}".`,
+          'Tu tarea es ARRANCAR la conversación de llenado de forma inteligente y natural.',
+          '',
+          'REGLAS ESTRICTAS:',
+          '- Máximo 5 rondas de preguntas para llenar TODO el documento.',
+          '- En CADA ronda agrupa todos los campos relacionados en UNA sola pregunta.',
+          '- NO uses listas, bullets ni headers en tu respuesta.',
+          '- Sé fluido y conversacional, como un asistente humano que guía al usuario.',
+          '- Ignora completamente cualquier campo que empiece con color_ — esos los maneja el sistema.',
+          '',
+          'REGLA CRÍTICA PARA LA PRIMERA PREGUNTA:',
+          '- Analiza la lista de campos y detecta si hay alguno que determine el TIPO o MODALIDAD del documento.',
+          '- Ejemplos de campos condicionales: instrumento_notarial, tipo_carta, modalidad, clase_contrato, con_notario, etc.',
+          '- Si detectas uno o más campos así, tu PRIMERA pregunta DEBE resolverlos antes de pedir cualquier otro dato.',
+          '- Explica brevemente qué implica cada opción. Ejemplo: "¿La carta será simple (solo testigos) o notariada (requiere datos de notario)?"',
+          '- Si no hay campos condicionales, arranca directo con las partes involucradas.',
+          '',
+          `Campos requeridos del documento: ${allRequiredKeys}`,
+          '',
+          'Grupos de campos (para organizar las siguientes rondas):',
+          groupLines,
+        ].filter(Boolean).join('\n'),
       },
       ...history,
       { role: 'user', content: String(message ?? '') },
