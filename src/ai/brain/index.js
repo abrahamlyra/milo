@@ -607,23 +607,73 @@ export async function runMiloBrain({
           reply = '✔️ ¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
         }
       } else {
-        const nextKey = missing[0];
-        const label = getLabel(nextKey);
-        const savedCount = Object.keys(toolResult?.provided || {}).length;
+        // Ignorar colores en el flujo conversacional
+        const realMissing = missing.filter(k => !String(k).startsWith('color_'));
+        const onlyColorsLeft = realMissing.length === 0;
 
-        // Si guardó varios campos de un jalón, confirmarlo
-        const savedKeys = Object.keys(input || {}).filter(k => k !== '__raw');
-        const multiSaved = savedKeys.length > 1;
+        if (onlyColorsLeft) {
+          reply = '¿Quieres usar el diseño de colores predeterminado o personalizarlos? Escribe `default` para usar el diseño estándar.';
+        } else {
+          // Agrupar campos faltantes por prefijo para pregunta inteligente
+          const groups = new Map();
+          for (const key of realMissing) {
+            const prefix = key.includes('_') ? key.split('_')[0] : 'general';
+            if (!groups.has(prefix)) groups.set(prefix, []);
+            groups.get(prefix).push(key);
+          }
 
-        const confirmLine = multiSaved
-          ? `✔️ Guardados ${savedKeys.length} campos.\n\n`
-          : '✔️ Guardado.\n\n';
+          // Obtener labels amigables desde el contrato en sesión
+          let contractFields = [];
+          try {
+            const sessionData = contextFactory()?.session;
+            const tid = sessionData?.selectedTemplateId;
+            contractFields = Array.isArray(sessionData?.contracts?.[tid]?.fields)
+              ? sessionData.contracts[tid].fields : [];
+          } catch (_) {}
 
-        const remainingLine = missing.length > 1
-          ? `Faltan **${missing.length}** datos. `
-          : '';
+          const groupLines = [...groups.entries()].map(([prefix, keys]) => {
+            const labels = keys.map(k => {
+              const spec = contractFields.find(f => f.key === k);
+              return spec?.label || k;
+            });
+            return `  Grupo "${prefix}": ${labels.join(', ')}`;
+          }).join('\n');
 
-        reply = `${confirmLine}${remainingLine}¿Cuál es el **${label}**?`;
+          const savedKeys = Object.keys(input || {}).filter(k => k !== '__raw');
+          const confirmLine = savedKeys.length > 1
+            ? `Guardé ${savedKeys.length} datos.`
+            : 'Guardado.';
+
+          const nextGroupCompletion = await openai.chat.completions.create({
+            model: DEFAULT_MODEL,
+            messages: [
+              {
+                role: 'system',
+                content: [
+                  'Eres Milo, asistente de Lyra Suite.',
+                  'Acabas de guardar datos de un documento y quedan campos por completar.',
+                  'Tu tarea es hacer UNA SOLA PREGUNTA que cubra el mayor número posible de campos relacionados.',
+                  '',
+                  'REGLAS:',
+                  '- Una pregunta por turno, que cubra todos los campos de un grupo relacionado.',
+                  '- No uses listas, bullets ni headers.',
+                  '- Sé conversacional y natural, no robótico.',
+                  '- Ignora campos que empiecen con color_.',
+                  '- Si solo queda un grupo, pregunta todos sus campos en una sola oración natural.',
+                  `- Empieza con una confirmación breve: "${confirmLine}"`,
+                  '',
+                  `Campos faltantes agrupados:\n${groupLines}`,
+                ].join('\n'),
+              },
+              ...history,
+              { role: 'user', content: String(message ?? '') },
+            ],
+            temperature: 0.4,
+          });
+
+          reply = nextGroupCompletion.choices?.[0]?.message?.content?.trim() ||
+            `${confirmLine} ¿Puedes darme los datos del grupo "${[...groups.keys()][0]}"?`;
+        }
       }
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
