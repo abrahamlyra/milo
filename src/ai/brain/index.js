@@ -504,12 +504,14 @@ export async function runMiloBrain({
           message,
           collectedSoFar: convState.collected || {},
           round: convState.round || 1,
+          stage: convState.stage || 'filling',
         });
 
         // Actualizar estado
         try {
           const sessionData = contextFactory()?.session;
           const tid = sessionData?.selectedTemplateId;
+
           if (fillResult.done) {
             // Limpiar estado conversacional
             delete sessionData._convFill[tid];
@@ -522,19 +524,61 @@ export async function runMiloBrain({
               rawReq: rawPayload,
             });
 
-            // Pedir correo
-            const reply = '¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
-            saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
-            return {
-              ok: true,
-              reply,
-              usedTools: ['fill.set'],
-              rawToolResult: setResult,
-              provided: setResult?.provided || null,
-            };
+            // Si hay correo, configurar delivery y generar
+            if (fillResult.email) {
+              await callMiloAction({
+                action: 'fill.delivery',
+                input: { mode: 'email', email: { to: fillResult.email } },
+                contextFactory,
+                rawReq: rawPayload,
+              });
+
+              const docResult = await callMiloAction({
+                action: 'documents.create',
+                input: {},
+                contextFactory,
+                rawReq: rawPayload,
+              });
+
+              const url = docResult?.url || docResult?.pdfUrl || null;
+              const reply = docResult?.ok
+                ? `¡Documento generado!\nEnviado a **${fillResult.email}**.${url ? `\n\n[Ver PDF](${url})` : ''}`
+                : '¡Listo! Escribe `generar` para crear el documento.';
+
+              saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+              return {
+                ok: true,
+                reply,
+                usedTools: ['fill.set', 'fill.delivery', 'documents.create'],
+                provided: setResult?.provided || null,
+              };
+            } else {
+              // Sin correo — solo generar
+              const docResult = await callMiloAction({
+                action: 'documents.create',
+                input: {},
+                contextFactory,
+                rawReq: rawPayload,
+              });
+
+              const url = docResult?.url || docResult?.pdfUrl || null;
+              const reply = docResult?.ok
+                ? `¡Documento generado!${url ? `\n\n[Ver PDF](${url})` : ''}`
+                : 'Escribe `generar` para crear el documento.';
+
+              saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+              return {
+                ok: true,
+                reply,
+                usedTools: ['fill.set', 'documents.create'],
+                provided: setResult?.provided || null,
+              };
+            }
           } else {
+            // Actualizar estado con stage y collected
             sessionData._convFill[tid].collected = fillResult.collected;
             sessionData._convFill[tid].round = (convState.round || 1) + 1;
+            sessionData._convFill[tid].stage = fillResult.stage || 'filling';
           }
         } catch (_) {}
 
