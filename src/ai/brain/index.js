@@ -4,6 +4,7 @@ import { loadHistory, saveTurn } from '../memory/conversation.js';
 import { buildMessages } from './prompts.js';
 import { callMiloAction } from './toolsBridge.js';
 import { formatTemplatesList } from '../../webhook/helpers/formatters.js';
+import { runConversationalFill } from './conversationalFill.js';
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
@@ -452,32 +453,99 @@ export async function runMiloBrain({
         };
       }
 
-      const built = await buildReplyFromTool({
+      // Arrancar flujo conversacional inteligente con el contrato cargado
+      const fillResult = await runConversationalFill({
         openai,
+        contract: toolResult,
         history,
         message,
-        action,
-        input,
-        toolResult,
+        collectedSoFar: {},
+        round: 0,
       });
 
-      let reply = built;
-      if (built && typeof built === 'object' && built.reply) {
-        reply = built.reply;
-      }
+      // Guardar estado del flujo conversacional en sesión
+      try {
+        const sessionData = contextFactory()?.session;
+        if (sessionData) {
+          sessionData._convFill = sessionData._convFill || {};
+          sessionData._convFill[templateId] = {
+            contract: toolResult,
+            collected: fillResult.collected || {},
+            round: 1,
+          };
+        }
+      } catch (_) {}
 
-      saveTurn({
-        sessionId,
-        userMessage: message,
-        assistantMessage: reply,
-      });
-
+      saveTurn({ sessionId, userMessage: message, assistantMessage: fillResult.reply });
       return {
         ok: true,
-        reply,
+        reply: fillResult.reply,
         usedTools: [action],
         rawToolResult: toolResult,
       };
+    }
+
+    // 🗣️ FAST-PATH: flujo conversacional activo — el usuario está respondiendo preguntas
+    {
+      let convState = null;
+      try {
+        const sessionData = contextFactory()?.session;
+        const tid = sessionData?.selectedTemplateId;
+        if (tid && sessionData?._convFill?.[tid]) {
+          convState = sessionData._convFill[tid];
+        }
+      } catch (_) {}
+
+      if (convState) {
+        const fillResult = await runConversationalFill({
+          openai,
+          contract: convState.contract,
+          history,
+          message,
+          collectedSoFar: convState.collected || {},
+          round: convState.round || 1,
+        });
+
+        // Actualizar estado
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          if (fillResult.done) {
+            // Limpiar estado conversacional
+            delete sessionData._convFill[tid];
+
+            // Ejecutar fill.set con todo el payload de un jalón
+            const setResult = await callMiloAction({
+              action: 'fill.set',
+              input: fillResult.payload,
+              contextFactory,
+              rawReq: rawPayload,
+            });
+
+            // Pedir correo
+            const reply = '¡Listo! Ya tengo todos los datos.\n\n¿A qué correo quieres que te envíe el documento? (Escribe el correo o escribe `sin correo` para solo generar el PDF.)';
+            saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+            return {
+              ok: true,
+              reply,
+              usedTools: ['fill.set'],
+              rawToolResult: setResult,
+              provided: setResult?.provided || null,
+            };
+          } else {
+            sessionData._convFill[tid].collected = fillResult.collected;
+            sessionData._convFill[tid].round = (convState.round || 1) + 1;
+          }
+        } catch (_) {}
+
+        saveTurn({ sessionId, userMessage: message, assistantMessage: fillResult.reply });
+        return {
+          ok: true,
+          reply: fillResult.reply,
+          usedTools: [],
+          provided: null,
+        };
+      }
     }
 
     // 1) Planner decide
