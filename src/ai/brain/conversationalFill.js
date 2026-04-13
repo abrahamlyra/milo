@@ -303,9 +303,61 @@ export async function runConversationalFill({
     ? contract.conditional_fields
     : [];
 
-  const allowedKeys = fields
+  // conditional_dependencies: mapa de qué campos viven dentro de cada bloque condicional
+  // { carta_notariada: ['notario_nombre', ...], carta_simple: ['testigo_1_nombre', ...] }
+  const conditionalDeps = (contract?.conditional_dependencies && typeof contract.conditional_dependencies === 'object')
+    ? contract.conditional_dependencies
+    : {};
+
+  // Calcular qué campos excluir basándose en los valores ya recopilados
+  // Si un campo condicional está en false/simple/no → excluir sus dependientes
+  function getExcludedFields(collected) {
+    const excluded = new Set();
+    for (const [condField, depFields] of Object.entries(conditionalDeps)) {
+      // Buscar si algún campo modal indica que este condicional es false
+      const condValue = collected[condField];
+      // Si está explícitamente en false, excluir sus dependientes
+      if (condValue === false || condValue === 'false') {
+        for (const f of depFields) excluded.add(f);
+        continue;
+      }
+      // Buscar en campos modales si el valor indica que este condicional no aplica
+      // Ej: instrumento_notarial = "simple" → carta_notariada = false
+      for (const modalField of modalFieldKeys) {
+        const modalVal = String(collected[modalField] || '').toLowerCase();
+        // El nombre del condicional contiene la pista — si el valor del modal
+        // coincide con otra opción del condicional, este no aplica
+        const condName = condField.toLowerCase();
+        if (modalVal && !condName.includes(modalVal) && !modalVal.includes(condName.replace(/^(carta_|incluye_|con_|permite_|tiene_|es_)/, ''))) {
+          // Verificar si algún otro conditional_field tiene mejor match
+          const otherFields = conditionalFields.filter(f => f !== condField);
+          const betterMatch = otherFields.some(f => {
+            const fName = f.toLowerCase().replace(/^(carta_|incluye_|con_|permite_|tiene_|es_)/, '');
+            return modalVal.includes(fName) || fName.includes(modalVal);
+          });
+          if (betterMatch) {
+            for (const f of depFields) excluded.add(f);
+          }
+        }
+      }
+    }
+    return excluded;
+  }
+
+  const modalFieldKeys = fields
+    .filter(f => {
+      const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
+      return f?.required && (conditionalFields.includes(f.key) || MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h)));
+    })
+    .map(f => f.key);
+
+  const baseAllowedKeys = fields
     .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
     .map(f => f.key);
+
+  // allowedKeys dinámico — se recalcula en cada turno excluyendo campos no aplicables
+  const excludedNow = getExcludedFields(collectedSoFar);
+  const allowedKeys = baseAllowedKeys.filter(k => !excludedNow.has(k));
 
   const fieldsContext = buildFieldsContext(fields);
   const { modalFields, groups } = groupFields(fields, conditionalFields);
@@ -391,6 +443,10 @@ export async function runConversationalFill({
       newCollected[modalKey] = modalValue;
       console.log('[ConvFill] modal direct:', modalKey, '=', modalValue);
 
+      // Recalcular campos excluidos con el nuevo valor del modal
+      const excludedAfterModal = getExcludedFields(newCollected);
+      console.log('[ConvFill] excluded after modal:', [...excludedAfterModal]);
+
       // Resolver campos dependientes del modal con contexto completo de missing
       const allMissingForModal = allowedKeys.filter(k => {
         const v = newCollected[k];
@@ -419,7 +475,11 @@ export async function runConversationalFill({
     }
   }
 
-  const missingRequired = allowedKeys.filter(k => {
+  // Recalcular allowedKeys con el collected actual (puede haber cambiado tras guardar modal)
+  const excludedCurrent = getExcludedFields(newCollected);
+  const effectiveAllowedKeys = baseAllowedKeys.filter(k => !excludedCurrent.has(k));
+
+  const missingRequired = effectiveAllowedKeys.filter(k => {
     const v = newCollected[k];
     return v === undefined || v === null || v === '';
   });
