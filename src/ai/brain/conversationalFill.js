@@ -409,9 +409,8 @@ export async function runConversationalFill({
         collected: newCollected,
         conditionalFields,
       });
-      // Solo aceptar campos que estén relacionados semánticamente con los conditional_fields
-      // — nunca resolver testigos, facultades, limitaciones, tramites ni campos de datos principales
-      const NEVER_RESOLVE = ['testigo', 'facultad', 'limitacion', 'tramite', 'objeto', 'vigencia', 'nombre', 'identificacion'];
+      // Solo proteger campos de datos principales — nunca campos de notaría
+      const NEVER_RESOLVE = ['otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor', 'arrendador', 'arrendatario'];
       for (const [k, v] of Object.entries(implied)) {
         const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
         if (!isProtected) newCollected[k] = v;
