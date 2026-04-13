@@ -416,6 +416,8 @@ export async function runConversationalFill({
   const pendingModal = modalFields.filter(f => missingRequired.includes(f.key));
 
   // Si hay campos modales pendientes — preguntar SOLO esos primero
+  console.log('[ConvFill] modalFields:', modalFields.map(f => f.key));
+  console.log('[ConvFill] pendingModal:', pendingModal.map(f => f.key));
   if (pendingModal.length > 0) {
     const reply = await buildNextQuestion({
       openai, history, message,
