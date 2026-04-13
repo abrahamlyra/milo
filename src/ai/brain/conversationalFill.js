@@ -36,11 +36,11 @@ function buildFieldsContext(fields) {
     .join(', ');
 }
 
-async function resolveImpliedFields({ openai, fields, collected, conditionalFields }) {
+async function resolveImpliedFields({ openai, fields, collected, conditionalFields, missingOverride }) {
   const allRequired = fields
     .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
     .map(f => f.key);
-  const missing = allRequired.filter(k => {
+  const missing = missingOverride || allRequired.filter(k => {
     const v = collected[k];
     return v === undefined || v === null || v === '';
   });
@@ -391,12 +391,16 @@ export async function runConversationalFill({
       newCollected[modalKey] = modalValue;
       console.log('[ConvFill] modal direct:', modalKey, '=', modalValue);
 
-      // Resolver campos dependientes del modal de forma determinística
-      // usando el LLM solo una vez con contexto completo
+      // Resolver campos dependientes del modal con contexto completo de missing
+      const allMissingForModal = allowedKeys.filter(k => {
+        const v = newCollected[k];
+        return v === undefined || v === null || v === '';
+      });
       const impliedFromModal = await resolveImpliedFields({
         openai, fields,
         collected: newCollected,
         conditionalFields,
+        missingOverride: allMissingForModal,
       });
       const NEVER_RESOLVE = ['otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor', 'arrendador', 'arrendatario'];
       for (const [k, v] of Object.entries(impliedFromModal)) {
