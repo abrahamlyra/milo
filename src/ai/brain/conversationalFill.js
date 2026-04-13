@@ -403,6 +403,7 @@ export async function runConversationalFill({
     const withColors = { ...collectedSoFar };
 
     if (!isDefault) {
+      // Usuario quiere personalizar — extraer colores del mensaje
       const colorKeys = colorFields.map(f => f.key);
       const colorContext = colorFields.map(f => `${f.key} (text)`).join(', ');
       const extracted = await extractFieldsFromMessage({
@@ -414,9 +415,13 @@ export async function runConversationalFill({
       });
       Object.assign(withColors, extracted);
     }
+    // Si es default no se pasan colores — el publicFunnelController los inyecta del :root del HTML
 
-    // Los que no se dieron — no pasar nada, el HTML tiene sus defaults en :root
-    // Solo pasamos los que el usuario personalizó explícitamente
+    // Rellenar campos excluidos con N/A para que el backend no los marque como faltantes
+    const excludedFinal = getExcludedFields(withColors);
+    for (const k of excludedFinal) {
+      if (!withColors[k]) withColors[k] = 'N/A';
+    }
 
     return {
       done: false,
