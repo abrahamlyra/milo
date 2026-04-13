@@ -1,45 +1,31 @@
 // src/ai/brain/conversationalFill.js
-//
-// Flujo conversacional inteligente para llenado de documentos.
-// - Recibe el contrato con sus fields exactos
-// - Agrupa campos y conversa en máximo 5 rondas
-// - Resuelve campos implícitos (ej: si es simple → notaría N/A automático)
-// - Pregunta colores al final (default o personalizados)
-// - Siempre pide correo antes de generar
-// - Cuando tiene todo devuelve { done: true, payload, email } con keys exactos del contrato
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-const COLOR_DEFAULTS = {
-  color_fondo:           '#FFFFFF',
-  color_fondo_oscuro:    '#F5F5F5',
-  color_fondo_cards:     '#FAFAFA',
-  color_texto_hero:      '#111111',
-  color_titulo_h1:       '#1a1a2e',
-  color_titulo_seccion:  '#16213e',
-  color_subtitulo:       '#444444',
-  color_parrafo:         '#555555',
-  color_acento:          '#0066CC',
-  color_bordes:          '#DDDDDD',
-};
-
-function groupFields(fields) {
+function groupFields(fields, conditionalKeys) {
   const required = fields.filter(f =>
     f?.required && !String(f?.key || '').startsWith('color_')
   );
+
+  // Campos condicionales vienen de contract.conditional_fields — son los booleanos de BD
+  // También detectamos por MODAL_HINTS como fallback
   const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
   const modalFields = required.filter(f =>
+    conditionalKeys.includes(f.key) ||
     MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))
   );
   const regularFields = required.filter(f =>
+    !conditionalKeys.includes(f.key) &&
     !MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))
   );
+
   const groups = new Map();
   for (const f of regularFields) {
     const prefix = f.key.includes('_') ? f.key.split('_')[0] : 'general';
     if (!groups.has(prefix)) groups.set(prefix, []);
     groups.get(prefix).push(f);
   }
+
   return { modalFields, groups };
 }
 
@@ -50,7 +36,7 @@ function buildFieldsContext(fields) {
     .join(', ');
 }
 
-async function resolveImpliedFields({ openai, fields, collected }) {
+async function resolveImpliedFields({ openai, fields, collected, conditionalFields }) {
   const allRequired = fields
     .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
     .map(f => f.key);
@@ -59,6 +45,11 @@ async function resolveImpliedFields({ openai, fields, collected }) {
     return v === undefined || v === null || v === '';
   });
   if (missing.length === 0) return {};
+
+  // Construir contexto de campos condicionales para que el LLM entienda las dependencias
+  const conditionalContext = conditionalFields.length > 0
+    ? `Campos condicionales del documento (booleanos que controlan secciones): ${conditionalFields.join(', ')}.`
+    : '';
 
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
@@ -70,20 +61,23 @@ async function resolveImpliedFields({ openai, fields, collected }) {
         content: [
           'Eres un asistente que resuelve campos implícitos en formularios de documentos legales.',
           'Dado un conjunto de valores ya recopilados y una lista de campos faltantes,',
-          'determina cuáles de los campos faltantes quedan automáticamente resueltos o no aplican',
-          'basándote en los valores ya dados.',
+          'determina cuáles quedan automáticamente resueltos o no aplican basándote en los valores dados.',
           '',
-          'LÓGICA GENERAL (aplica para cualquier template):',
-          '- Analiza semánticamente los valores ya recopilados y los campos faltantes.',
-          '- Si el valor de un campo condicional indica que algo NO aplica (ej: "simple", "ninguno", "no", "sin X", false) → rellena con "N/A" los campos que claramente dependen de esa condición.',
-          '- Si el valor indica que SÍ aplica (ej: "sí", "con X", true, o cualquier valor afirmativo) → NO resuelvas automáticamente los campos relacionados, el usuario debe proporcionarlos.',
-          '- Usa el nombre y contexto semántico de cada campo para inferir dependencias.',
-          '- Si no estás seguro de la relación entre campos, NO los resuelvas — devuelve {} para ese campo.',
+          conditionalContext,
           '',
-          'Responde SOLO con JSON de campos que puedes resolver automáticamente.',
+          'LÓGICA:',
+          '- Si el valor de un campo indica que algo NO aplica ("simple", "ninguno", "no", false, "N/A") →',
+          '  rellena con "N/A" los campos que semánticamente dependen de esa condición.',
+          '- Si el valor indica que SÍ aplica ("sí", true, cualquier valor afirmativo específico) →',
+          '  NO resuelvas automáticamente los campos relacionados — el usuario los debe dar.',
+          '- Usa el nombre semántico de los campos para inferir dependencias.',
+          '- Si no estás seguro, NO resuelvas — devuelve {} para ese campo.',
+          '- NUNCA resuelvas campos de datos principales (nombres, fechas, montos, identificaciones).',
+          '',
+          'Responde SOLO con JSON de campos resueltos automáticamente.',
           'Solo incluye campos de la lista de faltantes. No inventes campos nuevos.',
-          'Si no puedes resolver ninguno, responde: {}',
-        ].join('\n'),
+          'Si no puedes resolver ninguno: {}',
+        ].filter(Boolean).join('\n'),
       },
       {
         role: 'user',
@@ -108,8 +102,11 @@ async function resolveImpliedFields({ openai, fields, collected }) {
   }
 }
 
-async function extractFieldsFromMessage({ openai, message, history, allowedKeys, fieldsContext, collectedSoFar }) {
+async function extractFieldsFromMessage({ openai, message, history, allowedKeys, fieldsContext, collectedSoFar, conditionalFields }) {
   const alreadyCollected = Object.keys(collectedSoFar).join(', ') || 'ninguno';
+  const conditionalContext = conditionalFields.length > 0
+    ? `Campos condicionales (booleanos): ${conditionalFields.join(', ')}. Para estos campos, "sí/notariada/con X" → true, "no/simple/sin X" → false.`
+    : '';
 
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
@@ -120,25 +117,24 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
         role: 'system',
         content: [
           'Eres un extractor de datos para formularios de documentos legales.',
-          'Tu tarea es extraer los valores que el usuario proporcionó y mapearlos a los campos correctos.',
+          'Extrae los valores que el usuario proporcionó y mapéalos a los campos correctos.',
           '',
           'REGLAS:',
           '- Solo usa los campos de la lista permitida. NUNCA inventes campos nuevos.',
           '- Extrae TODOS los valores que el usuario dio aunque los haya mezclado.',
           '- Fechas → formato YYYY-MM-DD.',
-          '- "sí/si/yes" → true, "no" → false para booleanos.',
           '- "N/A", "ninguno", "no aplica", "no hay" → "N/A".',
           '- "sin limitaciones" → "ninguna".',
-          '- "simple" para instrumento → "simple".',
           '- Sé agresivo — si el usuario dio info que claramente corresponde a un campo, mapeála.',
           '- Analiza el historial completo para entender qué pregunta respondía el usuario.',
+          conditionalContext,
           '',
           `Campos ya recopilados (NO los repitas): ${alreadyCollected}`,
           `Campos permitidos (EXACTAMENTE estos nombres): ${fieldsContext}`,
           '',
           'Responde SOLO con JSON de campos NUEVOS: { "campo_exacto": "valor", ... }',
           'Si no hay nada nuevo: {}',
-        ].join('\n'),
+        ].filter(Boolean).join('\n'),
       },
       ...history,
       { role: 'user', content: String(message ?? '') },
@@ -161,7 +157,7 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
   }
 }
 
-async function buildNextQuestion({ openai, history, message, pendingGroups, collectedSoFar, documentName, isFirstQuestion }) {
+async function buildNextQuestion({ openai, history, message, pendingGroups, collectedSoFar, documentName, isFirstQuestion, conditionalFields }) {
   const groupLines = pendingGroups.map(([prefix, fields]) => {
     const labels = fields.map(f => f.label || f.key).join(', ');
     return `  Grupo "${prefix}": ${labels}`;
@@ -170,6 +166,10 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
   const collectedCount = Object.keys(collectedSoFar).length;
   const confirmLine = !isFirstQuestion && collectedCount > 0
     ? `Ya tengo ${collectedCount} dato${collectedCount > 1 ? 's' : ''}.`
+    : '';
+
+  const conditionalContext = conditionalFields.length > 0
+    ? `Campos condicionales del documento: ${conditionalFields.join(', ')}. Si alguno está en los grupos pendientes, pregúntalo PRIMERO explicando brevemente qué implica cada opción.`
     : '';
 
   const completion = await openai.chat.completions.create({
@@ -187,7 +187,7 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
           '- Una pregunta por turno cubriendo todos los campos de un grupo.',
           '- Sin listas, bullets ni headers.',
           '- Fluido y conversacional.',
-          '- Si es la primera pregunta y hay campos de modalidad, pregunta eso PRIMERO.',
+          conditionalContext,
           confirmLine ? `- Empieza con: "${confirmLine}"` : '',
           '',
           `Grupos de campos pendientes:\n${groupLines}`,
@@ -214,12 +214,17 @@ export async function runConversationalFill({
   const fields = Array.isArray(contract?.fields) ? contract.fields : [];
   const documentName = contract?.name || 'el documento';
 
+  // conditional_fields vienen del contrato (ya los expone el backend desde BD)
+  const conditionalFields = Array.isArray(contract?.conditional_fields)
+    ? contract.conditional_fields
+    : [];
+
   const allowedKeys = fields
     .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
     .map(f => f.key);
 
   const fieldsContext = buildFieldsContext(fields);
-  const { modalFields, groups } = groupFields(fields);
+  const { modalFields, groups } = groupFields(fields, conditionalFields);
   const colorFields = fields.filter(f => f?.required && String(f?.key || '').startsWith('color_'));
 
   // ── Etapa: email ──────────────────────────────────────────────────────────
@@ -252,12 +257,13 @@ export async function runConversationalFill({
       msgLower.includes('así está bien') ||
       msgLower.includes('asi esta bien') ||
       msgLower.includes('los de default') ||
-      msgLower.includes('no importa');
+      msgLower.includes('no importa') ||
+      msgLower.includes('los mismos') ||
+      msgLower.includes('igual');
 
     const withColors = { ...collectedSoFar };
 
     if (!isDefault) {
-      // Intentar extraer colores del mensaje
       const colorKeys = colorFields.map(f => f.key);
       const colorContext = colorFields.map(f => `${f.key} (text)`).join(', ');
       const extracted = await extractFieldsFromMessage({
@@ -265,14 +271,13 @@ export async function runConversationalFill({
         allowedKeys: colorKeys,
         fieldsContext: colorContext,
         collectedSoFar,
+        conditionalFields: [],
       });
       Object.assign(withColors, extracted);
     }
 
-    // Rellenar los que falten con default
-    for (const f of colorFields) {
-      if (!withColors[f.key]) withColors[f.key] = COLOR_DEFAULTS[f.key] || '#000000';
-    }
+    // Los que no se dieron — no pasar nada, el HTML tiene sus defaults en :root
+    // Solo pasamos los que el usuario personalizó explícitamente
 
     return {
       done: false,
@@ -290,11 +295,19 @@ export async function runConversationalFill({
       openai, message, history,
       allowedKeys, fieldsContext,
       collectedSoFar: newCollected,
+      conditionalFields,
     });
     newCollected = { ...newCollected, ...extracted };
 
-    const implied = await resolveImpliedFields({ openai, fields, collected: newCollected });
-    newCollected = { ...newCollected, ...implied };
+    // Resolver implícitos solo cuando hay suficiente contexto
+    if (Object.keys(newCollected).length >= 3) {
+      const implied = await resolveImpliedFields({
+        openai, fields,
+        collected: newCollected,
+        conditionalFields,
+      });
+      newCollected = { ...newCollected, ...implied };
+    }
   }
 
   const missingRequired = allowedKeys.filter(k => {
@@ -305,15 +318,6 @@ export async function runConversationalFill({
   console.log('[ConvFill] round:', round, 'missing:', missingRequired.length, missingRequired);
 
   if (missingRequired.length === 0) {
-    const hasColors = colorFields.every(f => !!newCollected[f.key]);
-    if (hasColors) {
-      return {
-        done: false,
-        stage: 'email',
-        collected: newCollected,
-        reply: '¿A qué correo te enviamos el documento? (O escribe `sin correo` para solo generar el PDF.)',
-      };
-    }
     return {
       done: false,
       stage: 'colors',
@@ -347,6 +351,7 @@ export async function runConversationalFill({
     collectedSoFar: newCollected,
     documentName,
     isFirstQuestion: round === 0,
+    conditionalFields,
   });
 
   return { done: false, stage: 'filling', reply, collected: newCollected };
