@@ -2,6 +2,28 @@
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
+/**
+ * Extrae colores del :root del HTML del template.
+ * --fondo → color_fondo, --acento → color_acento, etc.
+ */
+function extractColorsFromHtml(html) {
+  const colors = {};
+  if (!html) return colors;
+  const rootPattern = /:root\s*{([^}]*)}/g;
+  let match;
+  while ((match = rootPattern.exec(html)) !== null) {
+    const block = match[1];
+    const varPattern = /--([a-zA-Z_][a-zA-Z0-9_]*):\s*([^;]+);/g;
+    let varMatch;
+    while ((varMatch = varPattern.exec(block)) !== null) {
+      const key = `color_${varMatch[1].trim()}`;
+      const val = varMatch[2].trim();
+      if (!colors[key]) colors[key] = val;
+    }
+  }
+  return colors;
+}
+
 function groupFields(fields, conditionalKeys) {
   const required = fields.filter(f =>
     f?.required && !String(f?.key || '').startsWith('color_')
@@ -415,7 +437,12 @@ export async function runConversationalFill({
       });
       Object.assign(withColors, extracted);
     }
-    // Si es default no se pasan colores — el publicFunnelController los inyecta del :root del HTML
+
+    // Rellenar colores faltantes con los del :root del HTML del template
+    const htmlColors = extractColorsFromHtml(contract?.html || '');
+    for (const f of colorFields) {
+      if (!withColors[f.key]) withColors[f.key] = htmlColors[f.key] || '';
+    }
 
     // Rellenar campos excluidos con N/A para que el backend no los marque como faltantes
     const excludedFinal = getExcludedFields(withColors);

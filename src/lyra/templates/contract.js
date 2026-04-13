@@ -55,6 +55,7 @@ function normalizeContractView(templateId, raw) {
     flowExtras: raw?.flowExtras || {},
     conditional_fields: Array.isArray(raw?.conditional_fields) ? raw.conditional_fields : [],
     conditional_dependencies: (raw?.conditional_dependencies && typeof raw.conditional_dependencies === 'object') ? raw.conditional_dependencies : {},
+    html: raw?.html || '',
   };
 }
 
