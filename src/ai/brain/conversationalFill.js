@@ -413,9 +413,22 @@ export async function runConversationalFill({
   }
 
   // Construir grupos pendientes
-  const pendingGroups = [];
   const pendingModal = modalFields.filter(f => missingRequired.includes(f.key));
-  if (pendingModal.length > 0) pendingGroups.push(['tipo', pendingModal]);
+
+  // Si hay campos modales pendientes — preguntar SOLO esos primero
+  if (pendingModal.length > 0) {
+    const reply = await buildNextQuestion({
+      openai, history, message,
+      pendingGroups: [['tipo', pendingModal]],
+      collectedSoFar: newCollected,
+      documentName,
+      isFirstQuestion: round === 0,
+      conditionalFields,
+    });
+    return { done: false, stage: 'filling', reply, collected: newCollected };
+  }
+
+  const pendingGroups = [];
 
   for (const [prefix, gFields] of groups.entries()) {
     const pending = gFields.filter(f => missingRequired.includes(f.key));
