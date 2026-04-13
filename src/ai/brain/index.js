@@ -517,6 +517,8 @@ export async function runMiloBrain({
             delete sessionData._convFill[tid];
 
             // Ejecutar fill.set con todo el payload de un jalón
+            console.log('[Brain] fill.set payload keys:', Object.keys(fillResult.payload || {}));
+            console.log('[Brain] fill.set colores:', Object.entries(fillResult.payload || {}).filter(([k]) => k.startsWith('color_')).map(([k,v]) => `${k}=${v}`));
             const setResult = await callMiloAction({
               action: 'fill.set',
               input: fillResult.payload,
