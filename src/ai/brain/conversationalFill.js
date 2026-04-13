@@ -378,22 +378,47 @@ export async function runConversationalFill({
   let newCollected = { ...collectedSoFar };
 
   if (round > 0) {
-    const extracted = await extractFieldsFromMessage({
-      openai, message, history,
-      allowedKeys, fieldsContext,
-      collectedSoFar: newCollected,
-      conditionalFields,
+    // Fast-path: si el campo modal aún no tiene valor, el usuario está respondiendo esa pregunta
+    // Mapear directamente sin pasar por el extractor
+    const pendingModalNow = modalFields.filter(f => {
+      const v = newCollected[f.key];
+      return v === undefined || v === null || v === '';
     });
-    newCollected = { ...newCollected, ...extracted };
 
-    // Resolver implícitos solo cuando hay suficiente contexto
-    if (Object.keys(newCollected).length >= 3) {
+    if (pendingModalNow.length > 0) {
+      const modalKey = pendingModalNow[0].key;
+      newCollected[modalKey] = String(message ?? '').trim();
+      console.log('[ConvFill] modal direct:', modalKey, '=', newCollected[modalKey]);
+    } else {
+      const extracted = await extractFieldsFromMessage({
+        openai, message, history,
+        allowedKeys, fieldsContext,
+        collectedSoFar: newCollected,
+        conditionalFields,
+      });
+      newCollected = { ...newCollected, ...extracted };
+    }
+
+    // Resolver implícitos solo si hay valores de conditional_fields recopilados
+    const hasConditionalValues = conditionalFields.length > 0 ||
+      modalFields.some(f => newCollected[f.key] !== undefined && newCollected[f.key] !== null && newCollected[f.key] !== '');
+
+    if (hasConditionalValues && Object.keys(newCollected).length >= 3) {
       const implied = await resolveImpliedFields({
         openai, fields,
         collected: newCollected,
         conditionalFields,
       });
-      newCollected = { ...newCollected, ...implied };
+      // Solo aceptar campos que estén relacionados semánticamente con los conditional_fields
+      // — nunca resolver testigos, facultades, limitaciones, tramites ni campos de datos principales
+      const NEVER_RESOLVE = ['testigo', 'facultad', 'limitacion', 'tramite', 'objeto', 'vigencia', 'nombre', 'identificacion'];
+      for (const [k, v] of Object.entries(implied)) {
+        const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
+        if (!isProtected) newCollected[k] = v;
+      }
+      console.log('[ConvFill] impliedFields applied:', JSON.stringify(Object.fromEntries(
+        Object.entries(implied).filter(([k]) => !NEVER_RESOLVE.some(h => k.toLowerCase().includes(h)))
+      )));
     }
   }
 
