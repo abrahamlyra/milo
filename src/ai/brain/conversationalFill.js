@@ -387,8 +387,23 @@ export async function runConversationalFill({
 
     if (pendingModalNow.length > 0) {
       const modalKey = pendingModalNow[0].key;
-      newCollected[modalKey] = String(message ?? '').trim();
-      console.log('[ConvFill] modal direct:', modalKey, '=', newCollected[modalKey]);
+      const modalValue = String(message ?? '').trim();
+      newCollected[modalKey] = modalValue;
+      console.log('[ConvFill] modal direct:', modalKey, '=', modalValue);
+
+      // Resolver campos dependientes del modal de forma determinística
+      // usando el LLM solo una vez con contexto completo
+      const impliedFromModal = await resolveImpliedFields({
+        openai, fields,
+        collected: newCollected,
+        conditionalFields,
+      });
+      const NEVER_RESOLVE = ['otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor', 'arrendador', 'arrendatario'];
+      for (const [k, v] of Object.entries(impliedFromModal)) {
+        const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
+        if (!isProtected) newCollected[k] = v;
+      }
+      console.log('[ConvFill] modalImplied:', JSON.stringify(impliedFromModal));
     } else {
       const extracted = await extractFieldsFromMessage({
         openai, message, history,
@@ -397,27 +412,6 @@ export async function runConversationalFill({
         conditionalFields,
       });
       newCollected = { ...newCollected, ...extracted };
-    }
-
-    // Resolver implícitos solo si hay valores de conditional_fields recopilados
-    const hasConditionalValues = conditionalFields.length > 0 ||
-      modalFields.some(f => newCollected[f.key] !== undefined && newCollected[f.key] !== null && newCollected[f.key] !== '');
-
-    if (hasConditionalValues && Object.keys(newCollected).length >= 3) {
-      const implied = await resolveImpliedFields({
-        openai, fields,
-        collected: newCollected,
-        conditionalFields,
-      });
-      // Solo proteger campos de datos principales — nunca campos de notaría
-      const NEVER_RESOLVE = ['otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor', 'arrendador', 'arrendatario'];
-      for (const [k, v] of Object.entries(implied)) {
-        const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
-        if (!isProtected) newCollected[k] = v;
-      }
-      console.log('[ConvFill] impliedFields applied:', JSON.stringify(Object.fromEntries(
-        Object.entries(implied).filter(([k]) => !NEVER_RESOLVE.some(h => k.toLowerCase().includes(h)))
-      )));
     }
   }
 
