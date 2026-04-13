@@ -53,6 +53,7 @@ function normalizeContractView(templateId, raw) {
     payloadShape: raw?.payloadShape || null,
     mappings: raw?.mappings || null,
     flowExtras: raw?.flowExtras || {},
+    conditional_fields: Array.isArray(raw?.conditional_fields) ? raw.conditional_fields : [],
   };
 }
 
