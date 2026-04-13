@@ -158,19 +158,52 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
 }
 
 async function buildNextQuestion({ openai, history, message, pendingGroups, collectedSoFar, documentName, isFirstQuestion, conditionalFields }) {
-  const groupLines = pendingGroups.map(([prefix, fields]) => {
-    const labels = fields.map(f => f.label || f.key).join(', ');
-    return `  Grupo "${prefix}": ${labels}`;
-  }).join('\n');
-
   const collectedCount = Object.keys(collectedSoFar).length;
   const confirmLine = !isFirstQuestion && collectedCount > 0
     ? `Ya tengo ${collectedCount} dato${collectedCount > 1 ? 's' : ''}.`
     : '';
 
-  const conditionalContext = conditionalFields.length > 0
-    ? `Campos condicionales del documento: ${conditionalFields.join(', ')}. Si alguno está en los grupos pendientes, pregúntalo PRIMERO explicando brevemente qué implica cada opción.`
-    : '';
+  // Si hay grupos modales pendientes — solo preguntar esos, presentando las opciones
+  const hasPendingModal = pendingGroups[0]?.[0] === 'tipo';
+  if (hasPendingModal && conditionalFields.length > 0) {
+    const modalFields = pendingGroups[0][1];
+    const modalKeys = modalFields.map(f => f.label || f.key).join(', ');
+
+    const completion = await openai.chat.completions.create({
+      model: DEFAULT_MODEL,
+      temperature: 0.4,
+      messages: [
+        {
+          role: 'system',
+          content: [
+            'Eres Milo, asistente de Lyra Suite.',
+            `Estás ayudando al usuario a llenar el documento "${documentName}".`,
+            'Tu tarea es hacer UNA SOLA PREGUNTA que determine la modalidad del documento.',
+            '',
+            'REGLAS:',
+            '- Presenta las opciones disponibles de forma natural y conversacional.',
+            '- Explica brevemente en una frase qué implica cada opción.',
+            '- Sin listas, bullets ni headers — todo en una sola oración fluida.',
+            confirmLine ? `- Empieza con: "${confirmLine}"` : '',
+            '',
+            `Campo a resolver: ${modalKeys}`,
+            `Opciones posibles del documento: ${conditionalFields.join(', ')}`,
+          ].filter(Boolean).join('\n'),
+        },
+        ...history,
+        { role: 'user', content: String(message ?? '') },
+      ],
+    });
+
+    return completion.choices?.[0]?.message?.content?.trim() ||
+      `¿${modalKeys}? Las opciones son: ${conditionalFields.join(' o ')}.`;
+  }
+
+  // Grupos regulares — agrupar lo más posible
+  const groupLines = pendingGroups.map(([prefix, fields]) => {
+    const labels = fields.map(f => f.label || f.key).join(', ');
+    return `  Grupo "${prefix}": ${labels}`;
+  }).join('\n');
 
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
@@ -187,7 +220,6 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
           '- Una pregunta por turno cubriendo todos los campos de un grupo.',
           '- Sin listas, bullets ni headers.',
           '- Fluido y conversacional.',
-          conditionalContext,
           confirmLine ? `- Empieza con: "${confirmLine}"` : '',
           '',
           `Grupos de campos pendientes:\n${groupLines}`,
@@ -200,6 +232,57 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
 
   return completion.choices?.[0]?.message?.content?.trim() ||
     `¿Puedes darme los datos del grupo "${pendingGroups[0]?.[0]}"?`;
+}
+
+/**
+ * Deriva los valores booleanos de conditional_fields basándose en lo recopilado.
+ * Ejemplo: si instrumento_notarial = "simple" → carta_simple = true, carta_notariada = false
+ * Funciona para cualquier template sin hardcodear nada.
+ */
+async function deriveConditionalBooleans({ openai, collected, conditionalFields }) {
+  if (!conditionalFields.length) return {};
+
+  const completion = await openai.chat.completions.create({
+    model: DEFAULT_MODEL,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'Eres un asistente que deriva valores booleanos para campos condicionales de documentos legales.',
+          'Dado un conjunto de datos recopilados y una lista de campos booleanos condicionales,',
+          'determina el valor (true/false) de cada campo condicional basándote en los datos.',
+          '',
+          'REGLAS:',
+          '- Analiza semánticamente los valores recopilados para determinar qué opciones aplican.',
+          '- Cada campo condicional representa una variante o modalidad del documento.',
+          '- Solo uno o pocos de los campos condicionales deben ser true — los que aplican según los datos.',
+          '- Responde con true/false para TODOS los campos condicionales de la lista.',
+          '- No inventes campos nuevos.',
+          '',
+          'Responde SOLO con JSON: { "campo_condicional": true/false, ... }',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({ collected, conditionalFields }),
+      },
+    ],
+  });
+
+  const raw = completion.choices?.[0]?.message?.content || '{}';
+  try {
+    const parsed = JSON.parse(raw);
+    const clean = {};
+    for (const k of conditionalFields) {
+      if (k in parsed) clean[k] = !!parsed[k];
+    }
+    console.log('[ConvFill] conditionalBooleans:', JSON.stringify(clean));
+    return clean;
+  } catch {
+    return {};
+  }
 }
 
 export async function runConversationalFill({
@@ -232,11 +315,14 @@ export async function runConversationalFill({
     const emailMatch = String(message ?? '').match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
     const noEmail = /sin\s*correo|no\s*correo|solo\s*pdf|no\s*quiero/i.test(String(message ?? ''));
 
-    if (emailMatch) {
-      return { done: true, payload: collectedSoFar, email: emailMatch[0] };
-    }
-    if (noEmail) {
-      return { done: true, payload: collectedSoFar, email: null };
+    if (emailMatch || noEmail) {
+      // Derivar booleanos de conditional_fields basándose en lo recopilado
+      const finalPayload = { ...collectedSoFar };
+      if (conditionalFields.length > 0) {
+        const implied = await deriveConditionalBooleans({ openai, collected: finalPayload, conditionalFields });
+        Object.assign(finalPayload, implied);
+      }
+      return { done: true, payload: finalPayload, email: emailMatch ? emailMatch[0] : null };
     }
     return {
       done: false,
