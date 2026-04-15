@@ -477,21 +477,40 @@ export async function runMiloBrain({
       } catch (_) {}
 
       saveTurn({ sessionId, userMessage: message, assistantMessage: fillResult.reply });
+
+      // Construir session_data para que el front lo persista y resuelva el stateless
+      const initialConvFill = {};
+      try {
+        const sessionData = contextFactory()?.session;
+        if (sessionData?._convFill?.[templateId]) {
+          initialConvFill[templateId] = sessionData._convFill[templateId];
+        }
+      } catch (_) {}
+
       return {
         ok: true,
         reply: fillResult.reply,
         usedTools: [action],
         rawToolResult: toolResult,
+        provided: fillResult.collected || null,
+        session_data: {
+          templateId,
+          _convFill: initialConvFill,
+        },
       };
     }
 
     // 🗣️ FAST-PATH: flujo conversacional activo — el usuario está respondiendo preguntas
     {
       let convState = null;
+      let convFillFromClient = null;
       try {
         const sessionData = contextFactory()?.session;
         const tid = sessionData?.selectedTemplateId;
-        if (tid && sessionData?._convFill?.[tid]) {
+
+        // Primero intentar desde el context que viene del front (resuelve stateless de Cloud Run)
+        if (sessionData?._convFill && tid && sessionData._convFill[tid]) {
+          convFillFromClient = sessionData._convFill;
           convState = sessionData._convFill[tid];
         }
       } catch (_) {}
@@ -514,11 +533,8 @@ export async function runMiloBrain({
 
           if (fillResult.done) {
             // Limpiar estado conversacional
-            delete sessionData._convFill[tid];
+            if (sessionData._convFill) delete sessionData._convFill[tid];
 
-            // Ejecutar fill.set con todo el payload de un jalón
-            console.log('[Brain] fill.set payload keys:', Object.keys(fillResult.payload || {}));
-            console.log('[Brain] fill.set colores:', Object.entries(fillResult.payload || {}).filter(([k]) => k.startsWith('color_')).map(([k,v]) => `${k}=${v}`));
             const setResult = await callMiloAction({
               action: 'fill.set',
               input: fillResult.payload,
@@ -526,7 +542,6 @@ export async function runMiloBrain({
               rawReq: rawPayload,
             });
 
-            // Si hay correo, configurar delivery y generar
             if (fillResult.email) {
               await callMiloAction({
                 action: 'fill.delivery',
@@ -552,10 +567,10 @@ export async function runMiloBrain({
                 ok: true,
                 reply,
                 usedTools: ['fill.set', 'fill.delivery', 'documents.create'],
-                provided: setResult?.provided || null,
+                provided: setResult?.provided || fillResult.payload || null,
+                session_data: null,
               };
             } else {
-              // Sin correo — solo generar
               const docResult = await callMiloAction({
                 action: 'documents.create',
                 input: {},
@@ -573,14 +588,27 @@ export async function runMiloBrain({
                 ok: true,
                 reply,
                 usedTools: ['fill.set', 'documents.create'],
-                provided: setResult?.provided || null,
+                provided: setResult?.provided || fillResult.payload || null,
+                session_data: null,
               };
             }
           } else {
             // Actualizar estado con stage y collected
-            sessionData._convFill[tid].collected = fillResult.collected;
-            sessionData._convFill[tid].round = (convState.round || 1) + 1;
-            sessionData._convFill[tid].stage = fillResult.stage || 'filling';
+            if (sessionData._convFill && tid) {
+              sessionData._convFill[tid].collected = fillResult.collected;
+              sessionData._convFill[tid].round = (convState.round || 1) + 1;
+              sessionData._convFill[tid].stage = fillResult.stage || 'filling';
+            }
+          }
+        } catch (_) {}
+
+        // Construir session_data actualizado para que el front lo persista
+        const updatedConvFill = convFillFromClient ? { ...convFillFromClient } : {};
+        try {
+          const sessionData = contextFactory()?.session;
+          const tid = sessionData?.selectedTemplateId;
+          if (tid && sessionData?._convFill?.[tid]) {
+            updatedConvFill[tid] = sessionData._convFill[tid];
           }
         } catch (_) {}
 
@@ -590,6 +618,9 @@ export async function runMiloBrain({
           reply: fillResult.reply,
           usedTools: [],
           provided: fillResult.collected || null,
+          session_data: {
+            _convFill: updatedConvFill,
+          },
         };
       }
     }
