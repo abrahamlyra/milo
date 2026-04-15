@@ -468,8 +468,10 @@ export async function runMiloBrain({
         const sessionData = contextFactory()?.session;
         if (sessionData) {
           sessionData._convFill = sessionData._convFill || {};
+          // excluir html del contrato para no reventar el payload en requests subsecuentes
+          const { html: _html, ...contractSinHtml } = toolResult || {};
           sessionData._convFill[templateId] = {
-            contract: toolResult,
+            contract: contractSinHtml,
             collected: fillResult.collected || {},
             round: 1,
           };
