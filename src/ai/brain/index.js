@@ -589,7 +589,7 @@ export async function runMiloBrain({
           ok: true,
           reply: fillResult.reply,
           usedTools: [],
-          provided: null,
+          provided: fillResult.collected || null,
         };
       }
     }
