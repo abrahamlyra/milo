@@ -6,7 +6,7 @@ const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
  * Extrae colores del :root del HTML del template.
  * --fondo → color_fondo, --acento → color_acento, etc.
  */
-function extractColorsFromHtml(html) {
+export function extractColorsFromHtml(html) {
   const colors = {};
   if (!html) return colors;
   const rootPattern = /:root\s*{([^}]*)}/g;
@@ -438,10 +438,13 @@ export async function runConversationalFill({
       Object.assign(withColors, extracted);
     }
 
-    // Rellenar colores faltantes con los del :root del HTML del template
+    // Rellenar colores faltantes — del :root del HTML si existe, o de _htmlColors pre-extraídos
     const htmlColors = extractColorsFromHtml(contract?.html || '');
+    const cachedColors = contract?._htmlColors || {};
     for (const f of colorFields) {
-      if (!withColors[f.key]) withColors[f.key] = htmlColors[f.key] || '';
+      if (!withColors[f.key]) {
+        withColors[f.key] = htmlColors[f.key] || cachedColors[f.key] || collectedSoFar[f.key] || '';
+      }
     }
 
     // Rellenar campos excluidos con N/A para que el backend no los marque como faltantes

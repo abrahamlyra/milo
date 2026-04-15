@@ -4,7 +4,7 @@ import { loadHistory, saveTurn } from '../memory/conversation.js';
 import { buildMessages } from './prompts.js';
 import { callMiloAction } from './toolsBridge.js';
 import { formatTemplatesList } from '../../webhook/helpers/formatters.js';
-import { runConversationalFill } from './conversationalFill.js';
+import { runConversationalFill, extractColorsFromHtml } from './conversationalFill.js';
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
@@ -469,9 +469,11 @@ export async function runMiloBrain({
         if (sessionData) {
           sessionData._convFill = sessionData._convFill || {};
           // excluir html del contrato para no reventar el payload en requests subsecuentes
-          const { html: _html, ...contractSinHtml } = toolResult || {};
+          // pero extraer los colores del :root antes de descartarlo
+          const { html: templateHtml, ...contractSinHtml } = toolResult || {};
+          const htmlColors = extractColorsFromHtml(templateHtml || '');
           sessionData._convFill[templateId] = {
-            contract: contractSinHtml,
+            contract: { ...contractSinHtml, _htmlColors: htmlColors },
             collected: fillResult.collected || {},
             round: 1,
           };
