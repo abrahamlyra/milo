@@ -390,8 +390,18 @@ export async function runConversationalFill({
     const emailMatch = String(message ?? '').match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/);
     const noEmail = /sin\s*correo|no\s*correo|solo\s*pdf|no\s*quiero/i.test(String(message ?? ''));
 
+    // si el usuario quiere volver a personalizar colores — regresar a etapa colors
+    const wantsColors = /color|personaliz|cambiar\s*(el\s*)?dise[ñn]o|quiero\s*(cambiar|escoger|elegir)/i.test(String(message ?? ''));
+    if (wantsColors && !emailMatch) {
+      return {
+        done: false,
+        stage: 'colors',
+        collected: collectedSoFar,
+        reply: '¡Claro! ¿Quieres usar los colores predeterminados o personalizarlos? Escribe `default` para el diseño estándar.',
+      };
+    }
+
     if (emailMatch || noEmail) {
-      // Derivar booleanos de conditional_fields basándose en lo recopilado
       const finalPayload = { ...collectedSoFar };
       if (conditionalFields.length > 0) {
         const implied = await deriveConditionalBooleans({ openai, collected: finalPayload, conditionalFields });
