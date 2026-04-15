@@ -532,10 +532,16 @@ export async function runConversationalFill({
   console.log('[ConvFill] round:', round, 'missing:', missingRequired.length, missingRequired);
 
   if (missingRequired.length === 0) {
+    // inyectar colores del template en el collected para que el front pueda mostrar los pickers
+    const cachedColors = contract?._htmlColors || {};
+    const collectedWithColors = { ...newCollected };
+    for (const [k, v] of Object.entries(cachedColors)) {
+      if (!collectedWithColors[k]) collectedWithColors[k] = v;
+    }
     return {
       done: false,
       stage: 'colors',
-      collected: newCollected,
+      collected: collectedWithColors,
       reply: '¡Ya tengo todos los datos! ¿Quieres usar los colores predeterminados o personalizarlos? Escribe `default` para el diseño estándar.',
     };
   }
