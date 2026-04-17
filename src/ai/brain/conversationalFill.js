@@ -500,16 +500,38 @@ export async function runConversationalFill({
     });
 
     if (pendingModalNow.length > 0) {
-      const modalKey = pendingModalNow[0].key;
-      const modalValue = String(message ?? '').trim();
-      newCollected[modalKey] = modalValue;
-      console.log('[ConvFill] modal direct:', modalKey, '=', modalValue);
+      // Usar LLM para extraer el valor limpio del mensaje — evita que "con aval" quede como valor
+      const modalAllowedKeys = pendingModalNow.map(f => f.key);
+      const modalContext = pendingModalNow.map(f => `${f.key} (boolean)`).join(', ');
+      const modalExtracted = await extractFieldsFromMessage({
+        openai, message, history,
+        allowedKeys: modalAllowedKeys,
+        fieldsContext: modalContext,
+        collectedSoFar: newCollected,
+        conditionalFields,
+      });
+      // Aplicar valores extraídos; los no mencionados quedan sin valor (false se deriva después)
+      for (const [k, v] of Object.entries(modalExtracted)) {
+        newCollected[k] = v;
+      }
+      // Si el LLM no extrajo nada, usar el mensaje crudo como fallback solo para el primer modal
+      if (Object.keys(modalExtracted).length === 0) {
+        const modalKey = pendingModalNow[0].key;
+        newCollected[modalKey] = String(message ?? '').trim();
+      }
+      console.log('[ConvFill] modal extracted:', JSON.stringify(modalExtracted));
 
       // Recalcular campos excluidos con el nuevo valor del modal
       const excludedAfterModal = getExcludedFields(newCollected);
       console.log('[ConvFill] excluded after modal:', [...excludedAfterModal]);
 
-      // Resolver campos dependientes del modal con contexto completo de missing
+      // Resolver campos dependientes del modal
+      // NEVER_RESOLVE: campos de datos reales que nunca deben resolverse automáticamente
+      const NEVER_RESOLVE = [
+        'otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor',
+        'arrendador', 'arrendatario', 'forma_pago', 'lugar', 'fecha',
+        'monto', 'jurisdiccion', 'moneda',
+      ];
       const allMissingForModal = allowedKeys.filter(k => {
         const v = newCollected[k];
         return v === undefined || v === null || v === '';
@@ -520,7 +542,6 @@ export async function runConversationalFill({
         conditionalFields,
         missingOverride: allMissingForModal,
       });
-      const NEVER_RESOLVE = ['otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor', 'arrendador', 'arrendatario'];
       for (const [k, v] of Object.entries(impliedFromModal)) {
         const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
         if (!isProtected) newCollected[k] = v;
