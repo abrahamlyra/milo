@@ -29,8 +29,6 @@ function groupFields(fields, conditionalKeys) {
     f?.required && !String(f?.key || '').startsWith('color_')
   );
 
-  // Campos condicionales vienen de contract.conditional_fields — son los booleanos de BD
-  // También detectamos por MODAL_HINTS como fallback
   const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
   const modalFields = required.filter(f =>
     conditionalKeys.includes(f.key) ||
@@ -41,11 +39,15 @@ function groupFields(fields, conditionalKeys) {
     !MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))
   );
 
+  // Agrupar en bloques de máximo 5 campos RESPETANDO el orden del template.
+  // No agrupamos por prefijo — el orden del array fields ya viene del HTML.
+  const GROUP_SIZE = 5;
   const groups = new Map();
-  for (const f of regularFields) {
-    const prefix = f.key.includes('_') ? f.key.split('_')[0] : 'general';
-    if (!groups.has(prefix)) groups.set(prefix, []);
-    groups.get(prefix).push(f);
+  for (let i = 0; i < regularFields.length; i += GROUP_SIZE) {
+    const chunk = regularFields.slice(i, i + GROUP_SIZE);
+    // La clave del grupo es el índice para preservar orden en el Map
+    const groupKey = `grupo_${Math.floor(i / GROUP_SIZE)}`;
+    groups.set(groupKey, chunk);
   }
 
   return { modalFields, groups };
