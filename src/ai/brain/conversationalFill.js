@@ -252,18 +252,17 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
         content: [
           'Eres Milo, asistente de Lyra Suite.',
           `Estás ayudando al usuario a llenar el documento "${documentName}".`,
-          'Haz UNA SOLA PREGUNTA conversacional y natural que cubra el mayor número posible de campos relacionados.',
+          'Haz UNA SOLA PREGUNTA conversacional y natural que cubra los campos del grupo.',
           '',
           'REGLAS:',
-          '- Una pregunta por turno cubriendo todos los campos de un grupo.',
-          '- Usa markdown: negritas para datos importantes, saltos de línea entre ideas.',
+          '- Sin bullets ni guiones en tu pregunta — solo texto fluido.',
           '- Fluido y conversacional.',
           confirmLine ? `- Empieza con: "${confirmLine}"` : '',
-          '- Al FINAL de tu respuesta, después de la pregunta, agrega una línea en blanco y luego escribe:',
-          `  "Necesito:\n${listaFields}"`,
-          '- Esa lista va después de la pregunta, nunca antes.',
+          '- Termina tu respuesta con exactamente esto (sin cambiar el formato):',
+          `Necesito:`,
+          listaFields,
           '',
-          `Grupos de campos pendientes:\n${groupLines}`,
+          `Campos a preguntar: ${firstGroupFields.map(f => f.label || f.key).join(', ')}`,
         ].filter(Boolean).join('\n'),
       },
       ...history,
@@ -272,7 +271,7 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
   });
 
   return completion.choices?.[0]?.message?.content?.trim() ||
-    `¿Puedes darme los datos del grupo "${pendingGroups[0]?.[0]}"?`;
+    `¿Puedes darme los datos?\n\nNecesito:\n${listaFields}`;
 }
 
 /**
