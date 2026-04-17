@@ -29,15 +29,16 @@ function groupFields(fields, conditionalKeys) {
     f?.required && !String(f?.key || '').startsWith('color_')
   );
 
-  const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
-  const modalFields = required.filter(f =>
-    conditionalKeys.includes(f.key) ||
-    MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))
-  );
-  const regularFields = required.filter(f =>
-    !conditionalKeys.includes(f.key) &&
-    !MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))
-  );
+  // MODAL_HINTS solo aplica cuando NO hay conditional_fields explícitos en el contrato
+  // 'forma' se quitó porque forma_pago es un campo regular, no una modalidad del documento
+  const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase'];
+  const hasExplicitConditionals = conditionalKeys.length > 0;
+  const modalFields = required.filter(f => {
+    if (conditionalKeys.includes(f.key)) return true;
+    if (!hasExplicitConditionals && MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))) return true;
+    return false;
+  });
+  const regularFields = required.filter(f => !modalFields.includes(f));
 
   // Agrupar en bloques de máximo 5 campos RESPETANDO el orden del template.
   // No agrupamos por prefijo — el orden del array fields ya viene del HTML.
@@ -385,8 +386,14 @@ export async function runConversationalFill({
 
   const modalFieldKeys = fields
     .filter(f => {
-      const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
-      return f?.required && (conditionalFields.includes(f.key) || MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h)));
+      if (!f?.required) return false;
+      if (conditionalFields.includes(f.key)) return true;
+      // MODAL_HINTS solo si no hay conditional_fields explícitos; 'forma' excluido para no agarrar forma_pago
+      if (conditionalFields.length === 0) {
+        const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase'];
+        return MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h));
+      }
+      return false;
     })
     .map(f => f.key);
 
