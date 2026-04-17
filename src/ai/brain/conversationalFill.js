@@ -213,7 +213,7 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
             'REGLAS:',
             '- Presenta las opciones disponibles de forma natural y conversacional.',
             '- Explica brevemente en una frase qué implica cada opción.',
-            '- Sin listas, bullets ni headers — todo en una sola oración fluida.',
+            '- Usa markdown: negritas para opciones importantes, saltos de línea entre ideas.',
             confirmLine ? `- Empieza con: "${confirmLine}"` : '',
             '',
             `Campo a resolver: ${modalKeys}`,
@@ -235,6 +235,12 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
     return `  Grupo "${prefix}": ${labels}`;
   }).join('\n');
 
+  // Lista numerada de campos del primer grupo para mostrar al usuario
+  const firstGroupFields = pendingGroups[0]?.[1] || [];
+  const listaFields = firstGroupFields
+    .map((f, i) => `${i + 1}. **${f.label || f.key}**`)
+    .join('\n');
+
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
     temperature: 0.4,
@@ -248,9 +254,12 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
           '',
           'REGLAS:',
           '- Una pregunta por turno cubriendo todos los campos de un grupo.',
-          '- Sin listas, bullets ni headers.',
+          '- Usa markdown: negritas para datos importantes, saltos de línea entre ideas.',
           '- Fluido y conversacional.',
           confirmLine ? `- Empieza con: "${confirmLine}"` : '',
+          '- Al FINAL de tu respuesta, después de la pregunta, agrega una línea en blanco y luego escribe:',
+          `  "Necesito:\n${listaFields}"`,
+          '- Esa lista va después de la pregunta, nunca antes.',
           '',
           `Grupos de campos pendientes:\n${groupLines}`,
         ].filter(Boolean).join('\n'),
