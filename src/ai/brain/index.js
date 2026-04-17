@@ -476,6 +476,7 @@ export async function runMiloBrain({
             contract: { ...contractSinHtml, _htmlColors: htmlColors },
             collected: fillResult.collected || {},
             round: 1,
+            stage: fillResult.stage || 'filling',
           };
         }
       } catch (_) {}
@@ -563,7 +564,7 @@ export async function runMiloBrain({
 
               const url = docResult?.url || docResult?.pdfUrl || null;
               const reply = docResult?.ok
-                ? `¡Documento generado!\nEnviado a **${fillResult.email}**.${url ? `\n\n[Ver PDF](${url})` : ''}`
+                ? `¡Documento generado! Enviado a **${fillResult.email}**.${url ? `\n\n[Ver PDF](${url})` : ''}\n\n¿Quieres generar otro documento?`
                 : '¡Listo! Escribe `generar` para crear el documento.';
 
               saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
@@ -573,6 +574,7 @@ export async function runMiloBrain({
                 usedTools: ['fill.set', 'fill.delivery', 'documents.create'],
                 provided: setResult?.provided || fillResult.payload || null,
                 session_data: null,
+                suggest_restart: true,
               };
             } else {
               const docResult = await callMiloAction({
@@ -584,7 +586,7 @@ export async function runMiloBrain({
 
               const url = docResult?.url || docResult?.pdfUrl || null;
               const reply = docResult?.ok
-                ? `¡Documento generado!${url ? `\n\n[Ver PDF](${url})` : ''}`
+                ? `¡Documento generado!${url ? `\n\n[Ver PDF](${url})` : ''}\n\n¿Quieres generar otro documento?`
                 : 'Escribe `generar` para crear el documento.';
 
               saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
@@ -594,6 +596,7 @@ export async function runMiloBrain({
                 usedTools: ['fill.set', 'documents.create'],
                 provided: setResult?.provided || fillResult.payload || null,
                 session_data: null,
+                suggest_restart: true,
               };
             }
           } else {

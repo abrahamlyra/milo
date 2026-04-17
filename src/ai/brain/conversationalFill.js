@@ -130,6 +130,10 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
     ? `Campos condicionales (booleanos): ${conditionalFields.join(', ')}. Para estos campos, "sí/notariada/con X" → true, "no/simple/sin X" → false.`
     : '';
 
+  // Fecha real con UTC para evitar el bug de Cloud Run
+  const _d = new Date();
+  const fechaHoy = `${_d.getUTCFullYear()}-${String(_d.getUTCMonth()+1).padStart(2,'0')}-${String(_d.getUTCDate()).padStart(2,'0')}`;
+
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
     temperature: 0,
@@ -140,11 +144,14 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
         content: [
           'Eres un extractor de datos para formularios de documentos legales.',
           'Extrae los valores que el usuario proporcionó y mapéalos a los campos correctos.',
+          `La fecha de hoy es ${fechaHoy}.`,
           '',
           'REGLAS:',
           '- Solo usa los campos de la lista permitida. NUNCA inventes campos nuevos.',
           '- Extrae TODOS los valores que el usuario dio aunque los haya mezclado.',
-          '- Fechas → formato YYYY-MM-DD.',
+          `- Fechas → formato YYYY-MM-DD. "hoy" = ${fechaHoy}. Calcula fechas relativas ("en 10 días", "en un mes") desde hoy. NUNCA uses 2023-10-05 ni ninguna fecha de ejemplo.`,
+          '- Corrige errores ortográficos en nombres de personas y lugares (ej: "ciduad de mexico" → "Ciudad de México", "abrahan" → "Abraham").',
+          '- Capitaliza correctamente nombres propios de personas y lugares.',
           '- "N/A", "ninguno", "no aplica", "no hay" → "N/A".',
           '- "sin limitaciones" → "ninguna".',
           '- Si el usuario responde con el nombre de una opción condicional (como "simple", "notariada", o cualquier valor de los campos condicionales), mapearlo al campo modal correspondiente (ej: instrumento_notarial = "simple").',
@@ -152,10 +159,10 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
           '- Analiza el historial completo para entender qué pregunta respondía el usuario.',
           conditionalContext,
           '',
-          `Campos ya recopilados (NO los repitas): ${alreadyCollected}`,
+          `Campos ya recopilados (puedes sobreescribir si el usuario corrige uno): ${alreadyCollected}`,
           `Campos permitidos (EXACTAMENTE estos nombres): ${fieldsContext}`,
           '',
-          'Responde SOLO con JSON de campos NUEVOS: { "campo_exacto": "valor", ... }',
+          'Responde SOLO con JSON de campos NUEVOS o CORREGIDOS: { "campo_exacto": "valor", ... }',
           'Si no hay nada nuevo: {}',
         ].filter(Boolean).join('\n'),
       },
