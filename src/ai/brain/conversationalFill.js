@@ -539,9 +539,18 @@ export async function runConversationalFill({
         'arrendador', 'arrendatario', 'forma_pago', 'lugar', 'fecha',
         'monto', 'jurisdiccion', 'moneda',
       ];
+      // Solo pasar a resolveImpliedFields los campos que SÍ pueden derivarse automáticamente
+      // Campos de datos reales nunca se pasan — así el LLM no puede "resolver" forma_pago con "ninguna"
+      const NEVER_RESOLVE_KEYS = [
+        'otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor',
+        'arrendador', 'arrendatario', 'forma_pago', 'lugar', 'fecha',
+        'monto', 'jurisdiccion', 'moneda', 'nombre', 'identificacion',
+      ];
       const allMissingForModal = allowedKeys.filter(k => {
         const v = newCollected[k];
-        return v === undefined || v === null || v === '';
+        if (v !== undefined && v !== null && v !== '') return false;
+        // excluir campos de datos reales del resolve automático
+        return !NEVER_RESOLVE_KEYS.some(h => k.toLowerCase().includes(h));
       });
       const impliedFromModal = await resolveImpliedFields({
         openai, fields,
@@ -550,7 +559,7 @@ export async function runConversationalFill({
         missingOverride: allMissingForModal,
       });
       for (const [k, v] of Object.entries(impliedFromModal)) {
-        const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
+        const isProtected = NEVER_RESOLVE_KEYS.some(h => k.toLowerCase().includes(h));
         if (!isProtected) newCollected[k] = v;
       }
       console.log('[ConvFill] modalImplied:', JSON.stringify(impliedFromModal));
