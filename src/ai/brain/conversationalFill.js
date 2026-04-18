@@ -29,16 +29,25 @@ function groupFields(fields, conditionalKeys) {
     f?.required && !String(f?.key || '').startsWith('color_')
   );
 
-  // MODAL_HINTS solo aplica cuando NO hay conditional_fields explícitos en el contrato
-  // 'forma' se quitó porque forma_pago es un campo regular, no una modalidad del documento
-  const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase'];
-  const hasExplicitConditionals = conditionalKeys.length > 0;
-  const modalFields = required.filter(f => {
-    if (conditionalKeys.includes(f.key)) return true;
-    if (!hasExplicitConditionals && MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))) return true;
-    return false;
-  });
-  const regularFields = required.filter(f => !modalFields.includes(f));
+  const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
+  const requiredKeySet = new Set(required.map(f => f.key));
+
+  // Campos modales que SÍ están en required
+  const modalFieldsFromRequired = required.filter(f =>
+    conditionalKeys.includes(f.key) ||
+    MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h))
+  );
+
+  // Campos virtuales: conditional_fields que NO están en required
+  // Ejemplo: incluye_aval, incluye_interes_moratorio en el Pagaré
+  const virtualModals = conditionalKeys
+    .filter(k => !requiredKeySet.has(k))
+    .map(k => ({ key: k, label: k, type: 'boolean', required: true, _virtual: true }));
+
+  const modalFields = [...modalFieldsFromRequired, ...virtualModals];
+  const modalKeySet = new Set(modalFields.map(f => f.key));
+
+  const regularFields = required.filter(f => !modalKeySet.has(f.key));
 
   // Agrupar en bloques de máximo 5 campos RESPETANDO el orden del template.
   // No agrupamos por prefijo — el orden del array fields ya viene del HTML.
@@ -384,18 +393,17 @@ export async function runConversationalFill({
     return excluded;
   }
 
-  const modalFieldKeys = fields
-    .filter(f => {
-      if (!f?.required) return false;
-      if (conditionalFields.includes(f.key)) return true;
-      // MODAL_HINTS solo si no hay conditional_fields explícitos; 'forma' excluido para no agarrar forma_pago
-      if (conditionalFields.length === 0) {
-        const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase'];
-        return MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h));
-      }
-      return false;
-    })
-    .map(f => f.key);
+  const fieldKeySet = new Set(fields.map(f => f.key));
+  const modalFieldKeys = [
+    ...fields
+      .filter(f => {
+        const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
+        return f?.required && (conditionalFields.includes(f.key) || MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h)));
+      })
+      .map(f => f.key),
+    // virtual: conditional_fields que no son fields del formulario
+    ...conditionalFields.filter(k => !fieldKeySet.has(k)),
+  ];
 
   const baseAllowedKeys = fields
     .filter(f => f?.required && !String(f?.key || '').startsWith('color_'))
@@ -507,41 +515,17 @@ export async function runConversationalFill({
     });
 
     if (pendingModalNow.length > 0) {
-      // Usar LLM para extraer el valor limpio del mensaje — evita que "con aval" quede como valor
-      const modalAllowedKeys = pendingModalNow.map(f => f.key);
-      const modalContext = pendingModalNow.map(f => `${f.key} (boolean)`).join(', ');
-      const modalExtracted = await extractFieldsFromMessage({
-        openai, message, history,
-        allowedKeys: modalAllowedKeys,
-        fieldsContext: modalContext,
-        collectedSoFar: newCollected,
-        conditionalFields,
-      });
-      // Aplicar valores extraídos; los no mencionados quedan sin valor (false se deriva después)
-      for (const [k, v] of Object.entries(modalExtracted)) {
-        newCollected[k] = v;
-      }
-      // Si el LLM no extrajo nada, usar el mensaje crudo como fallback solo para el primer modal
-      if (Object.keys(modalExtracted).length === 0) {
-        const modalKey = pendingModalNow[0].key;
-        newCollected[modalKey] = String(message ?? '').trim();
-      }
-      console.log('[ConvFill] modal extracted:', JSON.stringify(modalExtracted));
+      const modalKey = pendingModalNow[0].key;
+      const modalValue = String(message ?? '').trim();
+      newCollected[modalKey] = modalValue;
+      console.log('[ConvFill] modal direct:', modalKey, '=', modalValue);
 
       // Recalcular campos excluidos con el nuevo valor del modal
       const excludedAfterModal = getExcludedFields(newCollected);
       console.log('[ConvFill] excluded after modal:', [...excludedAfterModal]);
 
-      // Resolver campos dependientes del modal
-      // NEVER_RESOLVE: campos de datos reales que nunca deben resolverse automáticamente
+      // Resolver campos dependientes del modal — excluir campos de datos reales
       const NEVER_RESOLVE = [
-        'otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor',
-        'arrendador', 'arrendatario', 'forma_pago', 'lugar', 'fecha',
-        'monto', 'jurisdiccion', 'moneda',
-      ];
-      // Solo pasar a resolveImpliedFields los campos que SÍ pueden derivarse automáticamente
-      // Campos de datos reales nunca se pasan — así el LLM no puede "resolver" forma_pago con "ninguna"
-      const NEVER_RESOLVE_KEYS = [
         'otorgante', 'apoderado', 'testigo', 'deudor', 'acreedor',
         'arrendador', 'arrendatario', 'forma_pago', 'lugar', 'fecha',
         'monto', 'jurisdiccion', 'moneda', 'nombre', 'identificacion',
@@ -549,8 +533,7 @@ export async function runConversationalFill({
       const allMissingForModal = allowedKeys.filter(k => {
         const v = newCollected[k];
         if (v !== undefined && v !== null && v !== '') return false;
-        // excluir campos de datos reales del resolve automático
-        return !NEVER_RESOLVE_KEYS.some(h => k.toLowerCase().includes(h));
+        return !NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
       });
       const impliedFromModal = await resolveImpliedFields({
         openai, fields,
@@ -559,7 +542,7 @@ export async function runConversationalFill({
         missingOverride: allMissingForModal,
       });
       for (const [k, v] of Object.entries(impliedFromModal)) {
-        const isProtected = NEVER_RESOLVE_KEYS.some(h => k.toLowerCase().includes(h));
+        const isProtected = NEVER_RESOLVE.some(h => k.toLowerCase().includes(h));
         if (!isProtected) newCollected[k] = v;
       }
       console.log('[ConvFill] modalImplied:', JSON.stringify(impliedFromModal));
@@ -578,10 +561,18 @@ export async function runConversationalFill({
   const excludedCurrent = getExcludedFields(newCollected);
   const effectiveAllowedKeys = baseAllowedKeys.filter(k => !excludedCurrent.has(k));
 
-  const missingRequired = effectiveAllowedKeys.filter(k => {
-    const v = newCollected[k];
-    return v === undefined || v === null || v === '';
-  });
+  // Incluir conditional_fields virtuales en missingRequired
+  const virtualConditionalKeys = conditionalFields.filter(k => !fieldKeySet.has(k));
+  const missingRequired = [
+    ...effectiveAllowedKeys.filter(k => {
+      const v = newCollected[k];
+      return v === undefined || v === null || v === '';
+    }),
+    ...virtualConditionalKeys.filter(k => {
+      const v = newCollected[k];
+      return v === undefined || v === null || v === '';
+    }),
+  ];
 
   console.log('[ConvFill] round:', round, 'missing:', missingRequired.length, missingRequired);
 
