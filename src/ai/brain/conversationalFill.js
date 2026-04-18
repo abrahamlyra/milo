@@ -29,7 +29,7 @@ function groupFields(fields, conditionalKeys) {
     f?.required && !String(f?.key || '').startsWith('color_')
   );
 
-  const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
+  const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase'];
   const requiredKeySet = new Set(required.map(f => f.key));
 
   // Campos modales que SÍ están en required
@@ -397,7 +397,7 @@ export async function runConversationalFill({
   const modalFieldKeys = [
     ...fields
       .filter(f => {
-        const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase', 'forma'];
+        const MODAL_HINTS = ['instrumento', 'tipo', 'modalidad', 'clase'];
         return f?.required && (conditionalFields.includes(f.key) || MODAL_HINTS.some(h => String(f.key).toLowerCase().startsWith(h)));
       })
       .map(f => f.key),
