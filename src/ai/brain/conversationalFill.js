@@ -527,12 +527,34 @@ export async function runConversationalFill({
     });
 
     if (pendingModalNow.length > 0) {
-      const modalKey = pendingModalNow[0].key;
-      const modalValue = String(message ?? '').trim();
-      newCollected[modalKey] = modalValue;
-      console.log('[ConvFill] modal direct:', modalKey, '=', modalValue);
+      // Extraer TODOS los modales pendientes del mensaje con el LLM — no solo el primero
+      const pendingModalKeys = pendingModalNow.map(f => f.key);
+      const modalFieldsContext = pendingModalNow.map(f => `${f.key} (boolean)`).join(', ');
+      const extractedModals = await extractFieldsFromMessage({
+        openai, message, history,
+        allowedKeys: pendingModalKeys,
+        fieldsContext: modalFieldsContext,
+        collectedSoFar: newCollected,
+        conditionalFields,
+      });
 
-      // Recalcular campos excluidos con el nuevo valor del modal
+      // Para los modales que el extractor no resolvió, si el usuario dijo "lo demás no"
+      // o equivalente → poner false en los que quedaron vacíos
+      const noRestHints = /lo\s*dem[aá]s\s*no|el\s*resto\s*no|nada\s*m[aá]s|solo\s*eso|ninguno\s*m[aá]s/i;
+      const userSaidNoRest = noRestHints.test(String(message ?? ''));
+
+      for (const key of pendingModalKeys) {
+        if (extractedModals[key] !== undefined && extractedModals[key] !== null) {
+          newCollected[key] = extractedModals[key];
+        } else if (userSaidNoRest) {
+          newCollected[key] = false;
+        }
+      }
+      console.log('[ConvFill] modal extracted:', JSON.stringify(
+        pendingModalKeys.reduce((acc, k) => { acc[k] = newCollected[k]; return acc; }, {})
+      ));
+
+      // Recalcular campos excluidos con los nuevos valores modales
       const excludedAfterModal = getExcludedFields(newCollected);
       console.log('[ConvFill] excluded after modal:', [...excludedAfterModal]);
 
