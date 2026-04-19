@@ -205,7 +205,7 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
 async function buildNextQuestion({ openai, history, message, pendingGroups, collectedSoFar, documentName, isFirstQuestion, conditionalFields }) {
   const collectedCount = Object.keys(collectedSoFar).length;
   const confirmLine = !isFirstQuestion && collectedCount > 0
-    ? `Ya tengo ${collectedCount} dato${collectedCount > 1 ? 's' : ''}.`
+    ? `Anotado.`
     : '';
 
   // Si hay grupos modales pendientes — solo preguntar esos, presentando las opciones
