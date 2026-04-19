@@ -273,6 +273,7 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
           confirmLine ? `- Empieza con: "${confirmLine}"` : '',
           '- NO incluyas lista de campos en tu respuesta — el sistema la agrega automáticamente.',
           '',
+          '- NUNCA digas que ya tienes toda la informacion o que el documento esta listo — todavia faltan campos.',
           `Campos a preguntar: ${firstGroupFields.map(f => f.label || f.key).join(', ')}`,
         ].filter(Boolean).join('\n'),
       },
