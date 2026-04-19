@@ -100,12 +100,15 @@ async function resolveImpliedFields({ openai, fields, collected, conditionalFiel
           conditionalContext,
           '',
           'LÓGICA:',
+          '- Solo resuelves un campo automáticamente si hay evidencia EXPLÍCITA Y DIRECTA en los valores recopilados.',
           '- Si el valor de un campo indica que algo NO aplica ("simple", "ninguno", "no", false, "N/A") →',
-          '  rellena con "N/A" los campos que semánticamente dependen de esa condición.',
+          '  rellena con "N/A" ÚNICAMENTE los campos que semánticamente dependen de ESA condición específica.',
           '- Si el valor indica que SÍ aplica ("sí", true, cualquier valor afirmativo específico) →',
           '  NO resuelvas automáticamente los campos relacionados — el usuario los debe dar.',
-          '- Usa el nombre semántico de los campos para inferir dependencias.',
-          '- Si no estás seguro, NO resuelvas — devuelve {} para ese campo.',
+          '- Si el mensaje del usuario es una frase vaga o negación general ("lo demás no", "eso no aplica", "nada más") →',
+          '  devuelve {} — NO resuelvas nada.',
+          '- Usa el nombre semántico de los campos para inferir dependencias SOLO cuando la relación es obvia.',
+          '- Si no estás completamente seguro, NO resuelvas — devuelve {} para ese campo.',
           '- NUNCA resuelvas campos de datos principales (nombres, fechas, montos, identificaciones).',
           '',
           'Responde SOLO con JSON de campos resueltos automáticamente.',
@@ -247,7 +250,7 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
     return `  Grupo "${prefix}": ${labels}`;
   }).join('\n');
 
-  // Lista numerada de campos del primer grupo para mostrar al usuario
+  // Lista numerada de campos del primer grupo — se concatena SIEMPRE al final del reply
   const firstGroupFields = pendingGroups[0]?.[1] || [];
   const listaFields = firstGroupFields
     .map((f, i) => `${i + 1}. **${f.label || f.key}**`)
@@ -268,9 +271,7 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
           '- Sin bullets ni guiones en tu pregunta — solo texto fluido.',
           '- Fluido y conversacional.',
           confirmLine ? `- Empieza con: "${confirmLine}"` : '',
-          '- Termina tu respuesta con exactamente esto (sin cambiar el formato):',
-          `Necesito:`,
-          listaFields,
+          '- NO incluyas lista de campos en tu respuesta — el sistema la agrega automáticamente.',
           '',
           `Campos a preguntar: ${firstGroupFields.map(f => f.label || f.key).join(', ')}`,
         ].filter(Boolean).join('\n'),
@@ -280,8 +281,11 @@ async function buildNextQuestion({ openai, history, message, pendingGroups, coll
     ],
   });
 
-  return completion.choices?.[0]?.message?.content?.trim() ||
-    `¿Puedes darme los datos?\n\nNecesito:\n${listaFields}`;
+  const llmReply = completion.choices?.[0]?.message?.content?.trim() ||
+    '¿Puedes darme los siguientes datos?';
+
+  // Concatenar lista siempre — sin depender del LLM
+  return `${llmReply}\n\nNecesito:\n${listaFields}`;
 }
 
 /**
@@ -360,14 +364,20 @@ export async function runConversationalFill({
 
   // Calcular qué campos excluir basándose en los valores ya recopilados
   // Si un campo condicional está en false/simple/no → excluir sus dependientes
+  // NUNCA excluir campos de datos reales aunque aparezcan en conditionalDeps
+  const NEVER_EXCLUDE = new Set([
+    'forma_pago', 'lugar', 'fecha', 'monto', 'jurisdiccion', 'moneda',
+  ]);
   function getExcludedFields(collected) {
     const excluded = new Set();
     for (const [condField, depFields] of Object.entries(conditionalDeps)) {
       // Buscar si algún campo modal indica que este condicional es false
       const condValue = collected[condField];
-      // Si está explícitamente en false, excluir sus dependientes
+      // Si está explícitamente en false, excluir sus dependientes (salvo protegidos)
       if (condValue === false || condValue === 'false') {
-        for (const f of depFields) excluded.add(f);
+        for (const f of depFields) {
+          if (!NEVER_EXCLUDE.has(f) && !NEVER_EXCLUDE.has(f.split('_')[0])) excluded.add(f);
+        }
         continue;
       }
       // Buscar en campos modales si el valor indica que este condicional no aplica
@@ -385,7 +395,9 @@ export async function runConversationalFill({
             return modalVal.includes(fName) || fName.includes(modalVal);
           });
           if (betterMatch) {
-            for (const f of depFields) excluded.add(f);
+            for (const f of depFields) {
+              if (!NEVER_EXCLUDE.has(f) && !NEVER_EXCLUDE.has(f.split('_')[0])) excluded.add(f);
+            }
           }
         }
       }
