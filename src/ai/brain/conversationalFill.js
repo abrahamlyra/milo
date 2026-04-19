@@ -417,16 +417,22 @@ export async function runConversationalFill({
     for (const condField of conditionalFields) {
       const condValue = collected[condField];
       if (condValue !== false && condValue !== 'false') continue;
-      // condField = 'carta_notariada' → stem = 'notarial'
-      // condField = 'incluye_aval' → stem = 'aval'
-      const stem = condField
-        .replace(/^(carta_|incluye_|con_|permite_|tiene_|es_|permite_)/, '')
+      // Generar varios stems del condField para matching flexible
+      // carta_notariada → ['notariada', 'notarial']
+      // incluye_aval → ['aval']
+      const baseStem = condField
+        .replace(/^(carta_|incluye_|con_|permite_|tiene_|es_)/, '')
         .toLowerCase();
-      if (!stem) continue;
+      if (!baseStem) continue;
+      // Variantes: el stem exacto + versión sin sufijo 'da'/'ada'
+      const stems = new Set([baseStem]);
+      if (baseStem.endsWith('ada')) stems.add(baseStem.slice(0, -3) + 'al');
+      if (baseStem.endsWith('da'))  stems.add(baseStem.slice(0, -2) + 'l');
       for (const f of baseAllowedKeys) {
         if (excluded.has(f)) continue;
         if (NEVER_EXCLUDE.has(f) || NEVER_EXCLUDE.has(f.split('_')[0])) continue;
-        if (f.toLowerCase().includes(stem)) excluded.add(f);
+        const fLower = f.toLowerCase();
+        if ([...stems].some(s => fLower.includes(s))) excluded.add(f);
       }
     }
 
