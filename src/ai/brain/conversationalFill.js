@@ -474,7 +474,7 @@ export async function runConversationalFill({
       done: false,
       stage: 'email',
       collected: correctedCollected,
-      reply: `${confirmMsg}¿A qué correo te enviamos el documento? (O escribe \`sin correo\` para solo generar el PDF.)`,
+      reply: `${confirmMsg}¿A qué correo te enviamos el documento?`,
     };
   }
 
