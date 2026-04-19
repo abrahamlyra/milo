@@ -442,10 +442,17 @@ export async function runConversationalFill({
       const equivalences = SEMANTIC_EQUIVALENCES[condField] || [];
       for (const eq of equivalences) stems.add(eq.toLowerCase());
       // Iterar todos los fields del template
+      // Si hay equivalencias explícitas, ignorar NEVER_EXCLUDE para esos patrones
+      // (porque el usuario ya dijo explícitamente que ese bloque no aplica)
+      const equivalenceSet = new Set(equivalences.map(e => e.toLowerCase()));
       for (const f of fields.map(f => f.key)) {
         if (excluded.has(f)) continue;
-        if (NEVER_EXCLUDE.has(f) || NEVER_EXCLUDE.has(f.split('_')[0])) continue;
         const fLower = f.toLowerCase();
+        // Si matchea una equivalencia explícita, excluir sin chequear NEVER_EXCLUDE
+        const matchedByEquivalence = [...equivalenceSet].some(eq => fLower.includes(eq));
+        if (!matchedByEquivalence) {
+          if (NEVER_EXCLUDE.has(f) || NEVER_EXCLUDE.has(f.split('_')[0])) continue;
+        }
         if ([...stems].some(s => fLower.includes(s))) excluded.add(f);
       }
     }
