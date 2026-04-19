@@ -168,8 +168,10 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
           '- Corrige errores ortográficos en nombres de personas y lugares (ej: "ciduad de mexico" → "Ciudad de México", "abrahan" → "Abraham").',
           '- Capitaliza correctamente nombres propios de personas y lugares.',
           '- "N/A", "ninguno", "no aplica", "no hay" → "N/A".',
-          '- Campos numericos (montos, rentas, depositos, intereses): guarda SOLO el numero sin simbolos, sin comas, sin $ y sin %. Ejemplos: "15,000 pesos" -> 15000, "12%" -> 12, "$34,000 MXN" -> 34000.',
+          '- Campos de dinero (monto_numero, renta_mensual, deposito_garantia, penalizacion_mora, pena_convencional_terminacion): guarda el numero con formato de miles usando coma. Ejemplos: "15000 pesos" -> "15,000", "34 mil" -> "34,000", "$15,456.50 MXN" -> "15,456.50". SIN signo $ y SIN texto de moneda.',
+          '- Campos de porcentaje (interes_moratorio_anual, frecuencia_incremento): guarda SOLO el numero sin % ni simbolos. Ejemplos: "15%" -> "15", "12 por ciento" -> "12".',
           '- "sin limitaciones" → "ninguna".',
+          '- NUNCA pongas N/A en campos de datos principales como jurisdiccion, lugar, fecha, nombre, identificacion, monto — siempre pregunta al usuario.',
           '- Si el usuario responde con el nombre de una opción condicional (como "simple", "notariada", o cualquier valor de los campos condicionales), mapearlo al campo modal correspondiente (ej: instrumento_notarial = "simple").',
           `- Campos condicionales del documento: ${conditionalFields.length ? conditionalFields.join(', ') : 'ninguno'}.`,
           '- Analiza el historial completo para entender qué pregunta respondía el usuario.',
@@ -455,11 +457,24 @@ export async function runConversationalFill({
       }
       return { done: true, payload: finalPayload, email: emailMatch ? emailMatch[0] : null };
     }
+    // Si el mensaje no es email ni "sin correo" — el usuario está corrigiendo un dato
+    // Procesar como si estuviera en filling y luego volver a preguntar el correo
+    const correctionExtracted = await extractFieldsFromMessage({
+      openai, message, history,
+      allowedKeys, fieldsContext,
+      collectedSoFar,
+      conditionalFields,
+    });
+    const correctedCollected = { ...collectedSoFar, ...correctionExtracted };
+    const correctionKeys = Object.keys(correctionExtracted);
+    const confirmMsg = correctionKeys.length > 0
+      ? `Anotado. `
+      : '';
     return {
       done: false,
       stage: 'email',
-      collected: collectedSoFar,
-      reply: '¿A qué correo te enviamos el documento? (O escribe `sin correo` para solo generar el PDF.)',
+      collected: correctedCollected,
+      reply: `${confirmMsg}¿A qué correo te enviamos el documento? (O escribe \`sin correo\` para solo generar el PDF.)`,
     };
   }
 
