@@ -538,10 +538,13 @@ export async function runConversationalFill({
         conditionalFields,
       });
 
-      // Para los modales que el extractor no resolvió, si el usuario dijo "lo demás no"
-      // o equivalente → poner false en los que quedaron vacíos
-      const noRestHints = /lo\s*dem[aá]s\s*no|el\s*resto\s*no|nada\s*m[aá]s|solo\s*eso|ninguno\s*m[aá]s/i;
-      const userSaidNoRest = noRestHints.test(String(message ?? ''));
+      // Para los modales que el extractor no resolvio, si el usuario hizo una lista cerrada
+      // ("solo X y Y", "lo demas no", "nada mas") -> poner false en los no mencionados
+      const msg = String(message ?? "");
+      const noRestHints = /lo\s*dem[aá]s\s*no|el\s*resto\s*no|nada\s*m[aá]s|solo\s*eso|ninguno\s*m[aá]s|\bsolo\b|\bsolamente\b/i;
+      const extractedCount = Object.keys(extractedModals).length;
+      const isClosedList = extractedCount > 0 && extractedCount < pendingModalKeys.length;
+      const userSaidNoRest = noRestHints.test(msg) || isClosedList;
 
       for (const key of pendingModalKeys) {
         if (extractedModals[key] !== undefined && extractedModals[key] !== null) {
