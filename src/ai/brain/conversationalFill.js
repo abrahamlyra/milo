@@ -409,6 +409,26 @@ export async function runConversationalFill({
         }
       }
     }
+
+    // Segunda pasada: para conditional_fields con valor false/true explícito,
+    // excluir campos cuyo nombre semánticamente pertenece a ese bloque
+    // aunque no estén en conditionalDeps (gap de la BD)
+    for (const condField of conditionalFields) {
+      const condValue = collected[condField];
+      if (condValue !== false && condValue !== 'false') continue;
+      // condField = 'carta_notariada' → stem = 'notarial'
+      // condField = 'incluye_aval' → stem = 'aval'
+      const stem = condField
+        .replace(/^(carta_|incluye_|con_|permite_|tiene_|es_|permite_)/, '')
+        .toLowerCase();
+      if (!stem) continue;
+      for (const f of baseAllowedKeys) {
+        if (excluded.has(f)) continue;
+        if (NEVER_EXCLUDE.has(f) || NEVER_EXCLUDE.has(f.split('_')[0])) continue;
+        if (f.toLowerCase().includes(stem)) excluded.add(f);
+      }
+    }
+
     return excluded;
   }
 
