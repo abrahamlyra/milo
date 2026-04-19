@@ -145,9 +145,12 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
     ? `Campos condicionales (booleanos): ${conditionalFields.join(', ')}. Para estos campos, "sí/notariada/con X" → true, "no/simple/sin X" → false.`
     : '';
 
-  // Fecha real con UTC para evitar el bug de Cloud Run
+  // Fecha en zona horaria de Ciudad de Mexico (UTC-6 invierno / UTC-5 verano)
+  // No usar getUTCDate() directo porque Cloud Run esta en UTC y en la noche adelanta un dia
   const _d = new Date();
-  const fechaHoy = `${_d.getUTCFullYear()}-${String(_d.getUTCMonth()+1).padStart(2,'0')}-${String(_d.getUTCDate()).padStart(2,'0')}`;
+  const _cdmxOffset = -6 * 60; // minutos, CST (ajusta a -5 en verano si hace falta)
+  const _cdmx = new Date(_d.getTime() + (_cdmxOffset - (-_d.getTimezoneOffset())) * 60000);
+  const fechaHoy = `${_cdmx.getFullYear()}-${String(_cdmx.getMonth()+1).padStart(2,'0')}-${String(_cdmx.getDate()).padStart(2,'0')}`;
 
   const completion = await openai.chat.completions.create({
     model: DEFAULT_MODEL,
@@ -528,7 +531,7 @@ export async function runConversationalFill({
       done: false,
       stage: 'email',
       collected: withColors,
-      reply: '¿A qué correo te enviamos el documento? (O escribe `sin correo` para solo generar el PDF.)',
+      reply: '¿A qué correo te enviamos el documento?',
     };
   }
 
@@ -675,7 +678,7 @@ export async function runConversationalFill({
       done: false,
       stage: 'email',
       collected: newCollected,
-      reply: '¿A qué correo te enviamos el documento? (O escribe `sin correo` para solo generar el PDF.)',
+      reply: '¿A qué correo te enviamos el documento?',
     };
   }
 
