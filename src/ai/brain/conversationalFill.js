@@ -414,21 +414,35 @@ export async function runConversationalFill({
     // Segunda pasada: para conditional_fields con valor false/true explícito,
     // excluir campos cuyo nombre semánticamente pertenece a ese bloque
     // aunque no estén en conditionalDeps (gap de la BD)
+    const GENERIC_TOKENS = new Set(['anual', 'mensual', 'diario', 'total', 'parcial', 'tipo', 'clase', 'modo']);
+    // Equivalencias explícitas para casos donde el naming no comparte raíz
+    // condField -> [patterns extra a matchear en campos]
+    const SEMANTIC_EQUIVALENCES = {
+      'carta_notariada': ['notaria', 'notario', 'libro_volumen', 'fecha_otorgamiento', 'instrumento'],
+    };
     for (const condField of conditionalFields) {
       const condValue = collected[condField];
       if (condValue !== false && condValue !== 'false') continue;
-      // Generar varios stems del condField para matching flexible
-      // carta_notariada → ['notariada', 'notarial']
-      // incluye_aval → ['aval']
       const baseStem = condField
         .replace(/^(carta_|incluye_|con_|permite_|tiene_|es_)/, '')
         .toLowerCase();
       if (!baseStem) continue;
-      // Variantes: el stem exacto + versión sin sufijo 'da'/'ada'
+      // Generar stems: base + variantes morfológicas + tokens significativos
       const stems = new Set([baseStem]);
       if (baseStem.endsWith('ada')) stems.add(baseStem.slice(0, -3) + 'al');
       if (baseStem.endsWith('da'))  stems.add(baseStem.slice(0, -2) + 'l');
-      for (const f of baseAllowedKeys) {
+      const tokens = baseStem.split('_');
+      const significant = tokens.filter(t => t.length >= 5 && !GENERIC_TOKENS.has(t));
+      for (const t of significant) {
+        stems.add(t);
+        // raiz corta para tokens largos
+        if (significant.length === 1 && t.length > 6) stems.add(t.slice(0, 5));
+      }
+      // agregar equivalencias explicitas si existen
+      const equivalences = SEMANTIC_EQUIVALENCES[condField] || [];
+      for (const eq of equivalences) stems.add(eq.toLowerCase());
+      // Iterar todos los fields del template
+      for (const f of fields.map(f => f.key)) {
         if (excluded.has(f)) continue;
         if (NEVER_EXCLUDE.has(f) || NEVER_EXCLUDE.has(f.split('_')[0])) continue;
         const fLower = f.toLowerCase();
