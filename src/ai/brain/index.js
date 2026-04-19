@@ -562,10 +562,27 @@ export async function runMiloBrain({
                 rawReq: rawPayload,
               });
 
+              // Detectar error de limite alcanzado (402 del backend publico)
+              const errStr = String(
+                docResult?.error ||
+                docResult?.detail ||
+                docResult?.message ||
+                ''
+              ).toLowerCase();
+              const hitLimit =
+                errStr.includes('limit_reached') ||
+                errStr.includes('limite') ||
+                docResult?.status === 402;
+
               const url = docResult?.url || docResult?.pdfUrl || null;
-              const reply = docResult?.ok
-                ? `¡Documento generado! Enviado a **${fillResult.email}**.${url ? `\n\n[Ver PDF](${url})` : ''}\n\n¿Quieres generar otro documento?`
-                : '¡Listo! Escribe `generar` para crear el documento.';
+              let reply;
+              if (docResult?.ok) {
+                reply = `¡Documento generado! Enviado a **${fillResult.email}**.${url ? `\n\n[Ver PDF](${url})` : ''}\n\n¿Quieres generar otro documento?`;
+              } else if (hitLimit) {
+                reply = 'LIMIT_REACHED: Ya usaste tus 3 documentos gratis. Para generar más, suscríbete con el botón de arriba.';
+              } else {
+                reply = 'No se pudo generar el documento. Intenta de nuevo en un momento.';
+              }
 
               saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
               return {
@@ -584,10 +601,27 @@ export async function runMiloBrain({
                 rawReq: rawPayload,
               });
 
+              // Detectar error de limite alcanzado
+              const errStr = String(
+                docResult?.error ||
+                docResult?.detail ||
+                docResult?.message ||
+                ''
+              ).toLowerCase();
+              const hitLimit =
+                errStr.includes('limit_reached') ||
+                errStr.includes('limite') ||
+                docResult?.status === 402;
+
               const url = docResult?.url || docResult?.pdfUrl || null;
-              const reply = docResult?.ok
-                ? `¡Documento generado!${url ? `\n\n[Ver PDF](${url})` : ''}\n\n¿Quieres generar otro documento?`
-                : 'Escribe `generar` para crear el documento.';
+              let reply;
+              if (docResult?.ok) {
+                reply = `¡Documento generado!${url ? `\n\n[Ver PDF](${url})` : ''}\n\n¿Quieres generar otro documento?`;
+              } else if (hitLimit) {
+                reply = 'LIMIT_REACHED: Ya usaste tus 3 documentos gratis. Para generar más, suscríbete con el botón de arriba.';
+              } else {
+                reply = 'No se pudo generar el documento. Intenta de nuevo en un momento.';
+              }
 
               saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
               return {
