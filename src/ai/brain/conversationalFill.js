@@ -179,6 +179,7 @@ async function extractFieldsFromMessage({ openai, message, history, allowedKeys,
           '- Si el usuario responde con el nombre de una opción condicional (como "simple", "notariada", o cualquier valor de los campos condicionales), mapearlo al campo modal correspondiente (ej: instrumento_notarial = "simple").',
           `- Campos condicionales del documento: ${conditionalFields.length ? conditionalFields.join(', ') : 'ninguno'}.`,
           '- Analiza el historial completo para entender qué pregunta respondía el usuario.',
+          '- Si el mensaje del usuario es una pregunta, duda o pide explicacion (ej: "que es eso?", "a que te refieres", "no entendi", "cuales son?", "explicame"), devuelve {} — NO extraigas nada, el bot respondera la pregunta en el siguiente turno.',
           conditionalContext,
           '',
           `Campos ya recopilados — sobreescribe si el usuario da un nuevo valor, especialmente si el valor actual es "N/A": ${alreadyCollected}`,
@@ -659,6 +660,68 @@ export async function runConversationalFill({
         conditionalFields,
       });
       newCollected = { ...newCollected, ...extracted };
+
+      // Si el extractor no saco nada y el mensaje parece pregunta, responderla
+      const extractedCount = Object.keys(extracted).length;
+      const msgLower = String(message ?? '').toLowerCase();
+      const looksLikeQuestion =
+        msgLower.includes('?') ||
+        /\b(que|cual|cuales|como|donde|cuando|por que|porque|no entiend|a que te refieres|explicame|explica|no se|no entendi)\b/i.test(msgLower);
+
+      if (extractedCount === 0 && looksLikeQuestion) {
+        // Determinar cual es el campo pendiente actual para contextualizar la respuesta
+        const excludedNow2 = getExcludedFields(newCollected);
+        const pendingKeys = baseAllowedKeys.filter(k => {
+          const v = newCollected[k];
+          if (excludedNow2.has(k)) return false;
+          return v === undefined || v === null || v === '';
+        });
+        const pendingLabels = pendingKeys.slice(0, 5).map(k => {
+          const spec = fields.find(f => f.key === k);
+          return spec?.label || k;
+        });
+
+        const answerCompletion = await openai.chat.completions.create({
+          model: DEFAULT_MODEL,
+          temperature: 0.4,
+          messages: [
+            {
+              role: 'system',
+              content: [
+                'Eres Milo, asistente de Lyra Suite.',
+                `Estas ayudando al usuario a llenar el documento "${documentName}".`,
+                'El usuario hizo una pregunta o expreso una duda sobre un campo del documento.',
+                'Tu tarea es:',
+                '1. Responder la duda de forma clara y concisa (1-2 oraciones).',
+                '2. Despues, volver a pedir los datos pendientes de forma natural.',
+                '',
+                'REGLAS:',
+                '- Se breve y directo. No repitas la pregunta del usuario.',
+                '- Sin bullets, sin guiones, sin listas. Solo prosa fluida.',
+                '- NO incluyas lista numerada de campos — el sistema la agrega.',
+                '',
+                `Campos pendientes que hay que volver a pedir: ${pendingLabels.join(', ')}`,
+              ].filter(Boolean).join('\n'),
+            },
+            ...history,
+            { role: 'user', content: String(message ?? '') },
+          ],
+        });
+
+        const answerText = answerCompletion.choices?.[0]?.message?.content?.trim() ||
+          'Te explico en breve.';
+
+        const listaFields = pendingLabels
+          .map((label, i) => `${i + 1}. **${label}**`)
+          .join('\n');
+
+        return {
+          done: false,
+          stage: 'filling',
+          collected: newCollected,
+          reply: `${answerText}\n\nNecesito:\n${listaFields}`,
+        };
+      }
     }
   }
 
