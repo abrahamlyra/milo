@@ -109,6 +109,25 @@ export function registerDocumentTools(contextFactory) {
             };
           }
           if (anonId) body.anon_id = anonId;
+
+          // Forzar el logo de Lyra en documentos generados desde el funnel
+          // publico. Esto es parte del modelo de monetizacion: el usuario
+          // obtiene 3 documentos gratis a cambio de que Lyra aparezca como
+          // emisor visual en el PDF. El preview publico ya muestra el logo
+          // (via prettifyInvoicePreviewHtml en el frontend), pero el backend
+          // /public/generate nunca lo recibia en `data` porque el bot solo
+          // mete en data lo que el usuario declaro via fill.set. Aqui lo
+          // inyectamos para que el PDF final quede identico al preview.
+          // Si el template no usa el placeholder {{logo_url}} o {{logo}}
+          // no tiene efecto.
+          const LYRA_PUBLIC_LOGO_URL =
+            'https://storage.googleapis.com/dev.lyrasuite.io/img/logo_Lyra.png';
+          if (body.data && typeof body.data === 'object') {
+            const hasLogoUrl = body.data.logo_url && String(body.data.logo_url).trim();
+            const hasLogo = body.data.logo && String(body.data.logo).trim();
+            if (!hasLogoUrl) body.data.logo_url = LYRA_PUBLIC_LOGO_URL;
+            if (!hasLogo) body.data.logo = LYRA_PUBLIC_LOGO_URL;
+          }
         }
 
         console.log(`📝 documents.create → POST ${endpoint}`, {
