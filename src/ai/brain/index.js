@@ -5,6 +5,7 @@ import { buildMessages } from './prompts.js';
 import { callMiloAction } from './toolsBridge.js';
 import { formatTemplatesList } from '../../webhook/helpers/formatters.js';
 import { runConversationalFill, extractColorsFromHtml } from './conversationalFill.js';
+import { loadConvFillFromDB, saveConvFillToDB, clearConvFillFromDB } from './convFillStore.js';
 
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
@@ -478,6 +479,12 @@ export async function runMiloBrain({
             round: 1,
             stage: fillResult.stage || 'filling',
           };
+
+          // Persistir en DB para sobrevivir reinicios de pod y timeouts del usuario
+          try {
+            const ctx = contextFactory();
+            await saveConvFillToDB(ctx.http, sessionData._convFill);
+          } catch (_) {}
         }
       } catch (_) {}
 
@@ -518,6 +525,21 @@ export async function runMiloBrain({
           convFillFromClient = sessionData._convFill;
           convState = sessionData._convFill[tid];
         }
+
+        // Fallback a DB: si no hay estado en memoria (pod reciclado, usuario tardó, etc.)
+        // cargamos desde Lyra y rehidratamos la sesión en memoria para este request
+        if (!convState && tid) {
+          const ctx = contextFactory();
+          const dbConvFill = await loadConvFillFromDB(ctx.http);
+          if (dbConvFill && dbConvFill[tid]) {
+            convFillFromClient = dbConvFill;
+            convState = dbConvFill[tid];
+            // Rehidratar en memoria para que el resto del request lo encuentre caliente
+            sessionData._convFill = sessionData._convFill || {};
+            sessionData._convFill[tid] = convState;
+            console.log('[Milo][Brain] convFill rehidratado desde DB para tid:', tid);
+          }
+        }
       } catch (_) {}
 
       if (convState) {
@@ -537,8 +559,12 @@ export async function runMiloBrain({
           const tid = sessionData?.selectedTemplateId;
 
           if (fillResult.done) {
-            // Limpiar estado conversacional
+            // Limpiar estado conversacional en memoria y en DB
             if (sessionData._convFill) delete sessionData._convFill[tid];
+            try {
+              const ctx = contextFactory();
+              await clearConvFillFromDB(ctx.http);
+            } catch (_) {}
 
             const setResult = await callMiloAction({
               action: 'fill.set',
@@ -640,6 +666,13 @@ export async function runMiloBrain({
               sessionData._convFill[tid].round = (convState.round || 1) + 1;
               sessionData._convFill[tid].stage = fillResult.stage || 'filling';
             }
+            // Persistir en DB para sobrevivir reinicios de pod y timeouts del usuario
+            try {
+              const ctx = contextFactory();
+              if (sessionData._convFill) {
+                await saveConvFillToDB(ctx.http, sessionData._convFill);
+              }
+            } catch (_) {}
           }
         } catch (_) {}
 
