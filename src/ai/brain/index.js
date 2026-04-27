@@ -543,11 +543,12 @@ export async function runMiloBrain({
       } catch (_) {}
 
       if (convState) {
-        // Detectar intención de salir/cancelar/listar antes de continuar el flujo.
-        // Si el usuario quiere cambiar de template o salir, limpiamos el estado.
+        // Detectar intención de salir/cancelar/cambiar de template antes de continuar el flujo.
         const msgLower = String(message ?? '').trim().toLowerCase();
+
+        // Regex amplio que cubre frases naturales del usuario
         const wantsExit =
-          /^(cancelar|salir|cancel|exit|abortar|abort|cambiar\s+template|cambiar\s+documento|otro\s+template|otro\s+documento|listar\s+templates?|lista\s+de\s+templates?|ver\s+templates?|mostrar\s+templates?)/.test(msgLower);
+          /cancelar|salir|cancel|exit|abortar|abort|cambiar\s*(de\s*)?(template|documento|plantilla)|otro\s*(template|documento|plantilla)|equivoc|me\s*equivoque|quiero\s*(otro|cambiar)|escog|elegir\s*(otro|otra|de\s*nuevo)|listar|lista\s*de|ver\s*(los\s*)?(template|plantilla)|mostrar\s*(template|plantilla)/.test(msgLower);
 
         if (wantsExit) {
           // Limpiar estado conversacional en memoria y en DB
@@ -560,30 +561,23 @@ export async function runMiloBrain({
             await clearConvFillFromDB(ctx.http);
           } catch (_) {}
 
-          // Si pide listar, ejecutar templates.list directamente
-          const wantsList = /listar|lista|ver\s+template|mostrar\s+template/.test(msgLower);
-          if (wantsList) {
-            const listResult = await callMiloAction({
-              action: 'templates.list',
-              input: {},
-              contextFactory,
-              rawReq: rawPayload,
-            });
-            const built = await buildReplyFromTool({
-              openai, history, message,
-              action: 'templates.list',
-              input: {},
-              toolResult: listResult,
-            });
-            const reply = typeof built === 'object' ? built.reply : built;
-            const templates = typeof built === 'object' ? built.templates : undefined;
-            saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
-            return { ok: true, reply, usedTools: ['templates.list'], templates };
-          }
-
-          const reply = 'Listo, cancelé el documento en progreso. ¿En qué más te puedo ayudar? Puedes escribir "listar templates" para ver tus plantillas.';
+          // Siempre listar templates cuando el usuario quiere cambiar o salir
+          const listResult = await callMiloAction({
+            action: 'templates.list',
+            input: {},
+            contextFactory,
+            rawReq: rawPayload,
+          });
+          const built = await buildReplyFromTool({
+            openai, history, message,
+            action: 'templates.list',
+            input: {},
+            toolResult: listResult,
+          });
+          const reply = typeof built === 'object' ? built.reply : built;
+          const templates = typeof built === 'object' ? built.templates : undefined;
           saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
-          return { ok: true, reply, usedTools: [] };
+          return { ok: true, reply, usedTools: ['templates.list'], templates };
         }
 
         const fillResult = await runConversationalFill({
