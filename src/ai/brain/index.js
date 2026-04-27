@@ -543,6 +543,49 @@ export async function runMiloBrain({
       } catch (_) {}
 
       if (convState) {
+        // Detectar intención de salir/cancelar/listar antes de continuar el flujo.
+        // Si el usuario quiere cambiar de template o salir, limpiamos el estado.
+        const msgLower = String(message ?? '').trim().toLowerCase();
+        const wantsExit =
+          /^(cancelar|salir|cancel|exit|abortar|abort|cambiar\s+template|cambiar\s+documento|otro\s+template|otro\s+documento|listar\s+templates?|lista\s+de\s+templates?|ver\s+templates?|mostrar\s+templates?)/.test(msgLower);
+
+        if (wantsExit) {
+          // Limpiar estado conversacional en memoria y en DB
+          try {
+            const sessionData = contextFactory()?.session;
+            const tid = sessionData?.selectedTemplateId;
+            if (sessionData?._convFill && tid) delete sessionData._convFill[tid];
+            if (sessionData) sessionData.selectedTemplateId = null;
+            const ctx = contextFactory();
+            await clearConvFillFromDB(ctx.http);
+          } catch (_) {}
+
+          // Si pide listar, ejecutar templates.list directamente
+          const wantsList = /listar|lista|ver\s+template|mostrar\s+template/.test(msgLower);
+          if (wantsList) {
+            const listResult = await callMiloAction({
+              action: 'templates.list',
+              input: {},
+              contextFactory,
+              rawReq: rawPayload,
+            });
+            const built = await buildReplyFromTool({
+              openai, history, message,
+              action: 'templates.list',
+              input: {},
+              toolResult: listResult,
+            });
+            const reply = typeof built === 'object' ? built.reply : built;
+            const templates = typeof built === 'object' ? built.templates : undefined;
+            saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+            return { ok: true, reply, usedTools: ['templates.list'], templates };
+          }
+
+          const reply = 'Listo, cancelé el documento en progreso. ¿En qué más te puedo ayudar? Puedes escribir "listar templates" para ver tus plantillas.';
+          saveTurn({ sessionId, userMessage: message, assistantMessage: reply });
+          return { ok: true, reply, usedTools: [] };
+        }
+
         const fillResult = await runConversationalFill({
           openai,
           contract: convState.contract,
@@ -687,12 +730,34 @@ export async function runMiloBrain({
         } catch (_) {}
 
         saveTurn({ sessionId, userMessage: message, assistantMessage: fillResult.reply });
+
+        // Obtener templateId y html para que el front pueda abrir el LivePreview
+        let activeTemplateId = null;
+        let activeTemplateHtml = null;
+        try {
+          const sessionData = contextFactory()?.session;
+          activeTemplateId = sessionData?.selectedTemplateId || null;
+          // El html se descartó del contrato para no reventar el payload,
+          // pero los colores quedaron en _htmlColors — el front los necesita en provided
+          if (activeTemplateId && sessionData?._convFill?.[activeTemplateId]) {
+            const htmlColors = sessionData._convFill[activeTemplateId]?.contract?._htmlColors || {};
+            // Mezclar colores en provided para que el preview los aplique
+            if (Object.keys(htmlColors).length && fillResult.collected) {
+              for (const [k, v] of Object.entries(htmlColors)) {
+                if (!fillResult.collected[k]) fillResult.collected[k] = v;
+              }
+            }
+          }
+        } catch (_) {}
+
         return {
           ok: true,
           reply: fillResult.reply,
           usedTools: [],
           provided: fillResult.collected || null,
+          templateId: activeTemplateId,
           session_data: {
+            templateId: activeTemplateId,
             _convFill: updatedConvFill,
           },
         };
@@ -733,6 +798,20 @@ export async function runMiloBrain({
     // 3) Ejecutar acción
     const action = plan.action;
     let input = plan.input || {};
+
+    // Si el planner decide listar templates y hay un convFill activo, limpiarlo primero
+    if (action === 'templates.list') {
+      try {
+        const sessionData = contextFactory()?.session;
+        const tid = sessionData?.selectedTemplateId;
+        if (tid && sessionData?._convFill?.[tid]) {
+          delete sessionData._convFill[tid];
+          sessionData.selectedTemplateId = null;
+          const ctx = contextFactory();
+          await clearConvFillFromDB(ctx.http);
+        }
+      } catch (_) {}
+    }
 
     // 3.1 Catálogos / knowledge: garantizar input.query
     if (CATALOG_ACTIONS.includes(action)) {
