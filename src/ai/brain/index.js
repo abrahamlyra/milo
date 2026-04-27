@@ -598,6 +598,9 @@ export async function runMiloBrain({
           if (fillResult.done) {
             // Limpiar estado conversacional en memoria y en DB
             if (sessionData._convFill) delete sessionData._convFill[tid];
+            // Limpiar también selectedTemplateId para que el siguiente mensaje
+            // no reencuentre el convState y caiga en loop infinito post-generación.
+            if (sessionData) sessionData.selectedTemplateId = null;
             try {
               const ctx = contextFactory();
               await clearConvFillFromDB(ctx.http);
